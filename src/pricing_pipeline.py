@@ -144,6 +144,41 @@ def backtest_pricing(
     return df
 
 
+def estimate_vrp(
+    prices:        np.ndarray,
+    dates,
+    lstm_vols:     np.ndarray,
+    market_prices: np.ndarray,
+    K_offsets:     np.ndarray | None = None,
+    T:             float = 21 / 252,
+    r:             float = 0.065,
+) -> float:
+    """
+    Estimate the Volatility Risk Premium (VRP) from a held-out dataset.
+
+    VRP = E[sigma_implied − sigma_lstm]
+
+    Under Girsanov's theorem the physical-measure vol (what LSTM forecasts)
+    and the risk-neutral vol (what the market prices) are related by the
+    market price of volatility risk.  This function estimates that premium
+    empirically so we can adjust LSTM test-set predictions toward the
+    risk-neutral measure.
+
+    Returns the scalar additive correction: sigma_Q ≈ sigma_P + VRP
+    """
+    diffs = []
+    for i in range(len(prices)):
+        S   = float(prices[i])
+        K   = float(K_offsets[i]) if K_offsets is not None else round(S / 100) * 100
+        mkt = float(market_prices[i])
+        sig_impl = implied_vol(mkt, S, K, T, r)
+        sig_lstm = float(lstm_vols[i])
+        if np.isnan(sig_impl) or sig_impl <= 0 or sig_lstm <= 0:
+            continue
+        diffs.append(sig_impl - sig_lstm)
+    return float(np.mean(diffs)) if diffs else 0.0
+
+
 def summarise_backtest(df: pd.DataFrame) -> pd.DataFrame:
     """Aggregate horse-race results by method."""
     return (

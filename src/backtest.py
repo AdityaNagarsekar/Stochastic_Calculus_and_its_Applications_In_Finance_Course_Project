@@ -27,6 +27,7 @@ def evaluate_rl_agent(
     env_params: dict,
     n_episodes: int = 1000,
     deterministic: bool = True,
+    sigma_for_bsm: float | None = None,  # if None, use env_params["sigma"]
 ) -> dict:
     """
     Roll out the RL model on fresh env episodes.
@@ -43,7 +44,8 @@ def evaluate_rl_agent(
     K = env_params.get("K", 100.0)
     T = env_params.get("T", 21 / 252)
     r = env_params.get("r", 0.05)
-    sigma = env_params.get("sigma", 0.20)
+    sigma = sigma_for_bsm if sigma_for_bsm is not None \
+            else env_params.get("sigma", 0.20)
 
     env = HedgingEnv(**env_params)
     terminal_pnl    = []
