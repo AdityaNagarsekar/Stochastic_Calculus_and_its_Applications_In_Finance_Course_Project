@@ -81,8 +81,15 @@ cp("p3_vol_forecast.png",      "fig_p3_vol_forecast.png")
 cp("p3_lstm_scatter.png",      "fig_p3_scatter.png")
 cp("p3_pricing_error_bar.png", "fig_p3_pricing_error.png")
 cp("p3_vega_surface.png",      "fig_p3_vega.png")
-cp("integration_mae_bar.png",  "fig_integration_mae.png")
-cp("integration_pnl.png",      "fig_integration_pnl.png")
+cp("integration_mae_bar.png",      "fig_integration_mae.png")
+cp("integration_pnl.png",          "fig_integration_pnl.png")
+cp("novel_rl_mae_ci.png",           "fig_novel_mae_ci.png")
+cp("p1_pnl_all_baselines.png",      "fig_p1_pnl_all_baselines.png")
+cp("p3_binomial_convergence.png",   "fig_p3_binomial_convergence.png")
+cp("bt_real_paths_pnl.png",         "fig_bt_real_paths_pnl.png")
+cp("bt_real_paths_cumulative.png",  "fig_bt_real_paths_cumulative.png")
+cp("bt_tc_sensitivity.png",         "fig_bt_tc_sensitivity.png")
+cp("bt_moneyness.png",              "fig_bt_moneyness.png")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. Flow diagram
@@ -498,7 +505,21 @@ maes    = [r["mae"]      for r in novel]
 corrs   = [r["corr"]     for r in novel]
 tcs     = [r["mean_tc"]  for r in novel]
 std_pnl = [r["std_pnl"]  for r in novel]
-colors  = [C_BSM, C_ITO, C_HEST, C_GARC, C_GAMMA]
+
+def _short_label(name: str, idx: int) -> str:
+    mapping = {
+        "A: GBM + MSE reward": "A\nGBM+MSE",
+        "B: GBM + Itô reward": "B\nGBM+Ito",
+        "C: Heston + MSE reward": "C\nHeston\n+MSE",
+        "D: Heston + Itô reward": "D\nHeston\n+Ito",
+        "E: GBM + Itô + gamma obs": "E\nGBM+Ito\n+Gamma",
+        "F: GBM + domain random σ": "F\nGBM+DR\nSigma",
+    }
+    return mapping.get(name, f"{chr(65 + idx)}\nExp {idx + 1}")
+
+labels = [_short_label(r.get("name", ""), i) for i, r in enumerate(novel)]
+palette = [C_BSM, C_ITO, C_HEST, C_GARC, C_GAMMA, C_RL, C_LSTM]
+colors = [palette[i % len(palette)] for i in range(len(novel))]
 
 fig, axes = plt.subplots(2, 2, figsize=(11, 7))
 x = np.arange(len(labels))
@@ -521,12 +542,83 @@ for ax, vals, ylabel, title, fmt in [
 axes[0,1].set_ylim(0, 1.15)
 axes[0,1].axhline(1.0, color="gray", lw=0.8, ls="--")
 
-plt.suptitle("Novel experiment results — 5 configurations, 1,000 evaluation episodes each",
+plt.suptitle(f"Novel experiment results — {len(novel)} configurations, 1,000 evaluation episodes each",
              fontsize=10, fontweight="bold")
 plt.tight_layout()
 fig.savefig(RFIGS / "fig_novel_summary.png")
 plt.close(fig)
 print("  done")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 8. Cross-experiment summary: all hedging strategies on the GBM env
+# ─────────────────────────────────────────────────────────────────────────────
+print("=== Generating fig_grand_summary.png ===")
+
+import json
+
+# Gather MAE + mean_cost for every GBM-env strategy from saved JSONs
+grand_rows = []
+
+p1_path = RES / "p1_metrics.json"
+if p1_path.exists():
+    for m in json.load(open(p1_path)):
+        grand_rows.append({"label": m["name"], "mae": m["mae"],
+                           "tc": m["mean_cost"], "group": "P1 (GBM)"})
+
+integ_path = RES / "integration_metrics.json"
+if integ_path.exists():
+    for m in json.load(open(integ_path)):
+        # skip duplicates already in p1_metrics
+        if not any(r["label"] == m["name"] for r in grand_rows):
+            grand_rows.append({"label": m["name"], "mae": m["mae"],
+                               "tc": m["mean_cost"], "group": "Integration"})
+
+novel_path = RES / "novel_rl_results.json"
+if novel_path.exists():
+    for m in json.load(open(novel_path)):
+        grand_rows.append({"label": m["name"].split(":")[0].strip(),
+                           "mae": m["mae"], "tc": m["mean_tc"],
+                           "group": "Novel"})
+
+if grand_rows:
+    labels_g = [r["label"]  for r in grand_rows]
+    maes_g   = [r["mae"]    for r in grand_rows]
+    tcs_g    = [r["tc"]     for r in grand_rows]
+    groups   = [r["group"]  for r in grand_rows]
+
+    group_colors = {"P1 (GBM)": C_BSM, "Integration": C_HEST, "Novel": C_RL}
+    bar_colors   = [group_colors.get(g, "#888888") for g in groups]
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    x = np.arange(len(labels_g))
+    w = 0.65
+
+    for ax, vals, ylabel, title in [
+        (axes[0], maes_g, "MAE (|terminal hedging PnL|)", "Hedging MAE — all strategies"),
+        (axes[1], tcs_g,  "Mean TC per episode",          "Transaction cost — all strategies"),
+    ]:
+        bars = ax.bar(x, vals, width=w, color=bar_colors, alpha=0.85, edgecolor="white")
+        ax.bar_label(bars, fmt="%.3f", padding=2, fontsize=7)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels_g, rotation=30, ha="right", fontsize=8)
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.set_title(title, fontsize=10)
+        ax.grid(axis="y", alpha=0.3)
+
+    # Group legend
+    handles = [mpatches.Patch(color=c, label=g, alpha=0.85)
+               for g, c in group_colors.items()]
+    axes[0].legend(handles=handles, fontsize=8, loc="upper right")
+
+    plt.suptitle("Grand comparison — all hedging strategies\n"
+                 "(GBM σ=0.20 eval environment where applicable)",
+                 fontsize=10, fontweight="bold")
+    plt.tight_layout()
+    fig.savefig(RFIGS / "fig_grand_summary.png")
+    plt.close(fig)
+    print(f"  done  ({len(grand_rows)} strategies)")
+else:
+    print("  skipped — no JSON results found (run pipeline first)")
 
 print(f"\n{'='*50}")
 print(f"All figures written to  {RFIGS}")

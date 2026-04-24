@@ -26,6 +26,7 @@ from bsm import bsm_price, bsm_delta, implied_vol
 from data_pipeline import load_nifty, make_sequences, split_data, normalize_splits
 from lstm_model import VolLSTM, predict
 from pricing_pipeline import backtest_pricing, summarise_backtest
+from backtest import analyse_hedging_results, paired_bootstrap_mae_diff
 import torch
 
 RESULTS = Path(__file__).parent.parent / "results"
@@ -37,6 +38,8 @@ KAPPA  = 0.001      # baseline transaction cost
 N_STEP = 21         # steps per hedging episode
 T_OPT  = 21 / 252
 
+PROC = Path(__file__).parent.parent / "data" / "processed"
+
 # ── load data once ───────────────────────────────────────────────────────────
 print("Loading data and models...")
 df       = load_nifty()
@@ -46,18 +49,46 @@ splits, scaler = normalize_splits(splits)
 
 rl_model = PPO.load(str(MODELS / "ppo_hedge_v1"))
 
-lstm = VolLSTM(input_size=4, hidden1=64, hidden2=32)
+lstm = VolLSTM(input_size=6, hidden1=64, hidden2=32)
 lstm.load_state_dict(torch.load(str(MODELS / "lstm_vol_best.pt"), map_location="cpu"))
 lstm.eval()
-lstm_vols = predict(lstm, splits["test"]["X"])
+lstm_vols_test = predict(lstm, splits["test"]["X"])
+
+# Load val LSTM predictions (saved by run_p3.py); fall back to re-computing
+val_preds_path = PROC / "lstm_val_preds.npy"
+if val_preds_path.exists():
+    lstm_vols_val = np.load(val_preds_path)
+else:
+    lstm_vols_val = predict(lstm, splits["val"]["X"])
 
 test_dates  = splits["test"]["dates"]
 test_prices = df.loc[test_dates, "Close"].values.astype(float)
-hist_vols   = df.loc[test_dates, "rv21"].values.astype(float)
-log_rets    = df.loc[test_dates, "log_ret"].values.astype(float)
+hist_vols_test = df.loc[test_dates, "rv21"].values.astype(float)
+
+val_dates   = splits["val"]["dates"]
+val_prices  = df.loc[val_dates, "Close"].values.astype(float)
+hist_vols_val = df.loc[val_dates, "rv21"].values.astype(float)
+
+# ── Combine val + test for larger sample (val: Aug 2020–Oct 2022, test: Oct 2022–Dec 2024)
+# Neither BSM delta nor the RL model was trained on real prices, so using
+# the val period here does not introduce any data leakage.
+combined_dates  = pd.concat([pd.Series(val_dates),  pd.Series(test_dates)],
+                             ignore_index=True)
+combined_prices = np.concatenate([val_prices,  test_prices])
+combined_hist   = np.concatenate([hist_vols_val, hist_vols_test])
+combined_lstm   = np.concatenate([lstm_vols_val, lstm_vols_test])
+combined_true   = np.concatenate([splits["val"]["y"],  splits["test"]["y"]])
+
+# Keep test-only arrays for moneyness backtest (consistent K_offset computation)
+test_true = splits["test"]["y"]
+hist_vols = hist_vols_test
+lstm_vols = lstm_vols_test
+log_rets  = df.loc[test_dates, "log_ret"].values.astype(float)
 
 print(f"Test set: {len(test_dates)} dates, "
       f"{test_dates.min().date()} – {test_dates.max().date()}")
+print(f"Val+Test combined: {len(combined_dates)} dates, "
+      f"{combined_dates.min().date()} – {combined_dates.max().date()}")
 
 
 # =============================================================================
@@ -144,21 +175,25 @@ print("\n" + "=" * 60)
 print("BACKTESTS 1 & 6 — Hedging on real Nifty price paths")
 print("=" * 60)
 
-real_paths = _extract_real_paths(test_prices, window=N_STEP, stride=N_STEP)
-print(f"Extracted {len(real_paths)} non-overlapping 21-day windows")
+# Use the combined val+test series for more statistical power (~50 windows)
+real_paths = _extract_real_paths(combined_prices, window=N_STEP, stride=N_STEP)
+print(f"Extracted {len(real_paths)} non-overlapping 21-day windows (val+test period)")
 
 bsm_pnl_real, bsm_tc_real = [], []
 rl_pnl_real,  rl_tc_real  = [], []
+real_start_moneyness = []
+real_sigma_levels = []
 
-# Use a rolling 21-day historical vol as sigma for the hedge model
+# Use rv21 at the start of each window as hedge sigma
 hist_sigma_windows = []
-for i in range(0, len(test_prices) - N_STEP, N_STEP):
-    # sigma = rv21 at the start of the window
-    hist_sigma_windows.append(float(hist_vols[i]))
+for i in range(0, len(combined_prices) - N_STEP, N_STEP):
+    hist_sigma_windows.append(float(combined_hist[i]))
 
 for path, sigma in zip(real_paths, hist_sigma_windows):
     S0 = path[0]
     K  = round(S0 / 50) * 50   # nearest 50-pt ATM strike (Nifty convention)
+    real_start_moneyness.append(float(S0 / K))
+    real_sigma_levels.append(float(sigma))
 
     p_bsm, tc_bsm = _run_bsm_on_path(path, K, T_OPT, R, sigma, KAPPA)
     p_rl,  tc_rl  = _run_rl_on_path( path, K, T_OPT, R, sigma, KAPPA, rl_model)
@@ -181,6 +216,27 @@ summary_real = pd.DataFrame({
 
 print(summary_real.to_string())
 summary_real.to_csv(RESULTS / "bt_real_paths_summary.csv")
+
+real_analysis = {
+    "bsm_daily": analyse_hedging_results(
+        bsm_pnl_real,
+        np.asarray(bsm_tc_real),
+        moneyness=np.asarray(real_start_moneyness),
+        sigma_proxy=np.asarray(real_sigma_levels),
+    ),
+    "rl_ppo": analyse_hedging_results(
+        rl_pnl_real,
+        np.asarray(rl_tc_real),
+        moneyness=np.asarray(real_start_moneyness),
+        sigma_proxy=np.asarray(real_sigma_levels),
+    ),
+    "paired_bootstrap": {
+        "bsm_vs_rl": paired_bootstrap_mae_diff(bsm_pnl_real, rl_pnl_real),
+    },
+}
+with open(RESULTS / "bt_real_paths_analysis.json", "w") as f:
+    json.dump(real_analysis, f, indent=2)
+print("Saved bt_real_paths_analysis.json")
 
 # Plot — terminal PnL distributions on real paths
 fig, ax = plt.subplots(figsize=(9, 5))
@@ -289,30 +345,47 @@ moneyness_levels = {
 
 all_summaries = {}
 proxy_rng = np.random.default_rng(42)
-test_true  = splits["test"]["y"]
+# Use combined val+test for moneyness stress test (more observations, same logic)
+bt_prices_all = combined_prices
+bt_dates_all  = combined_dates
+bt_hist_all   = combined_hist
+bt_lstm_all   = combined_lstm
+bt_true_all   = combined_true
 
 for label, mk in moneyness_levels.items():
     # Strike implied by moneyness: K = S / mk → so S/K = mk
-    strikes = np.array([round(float(s) / mk / 50) * 50 for s in test_prices])
+    strikes = np.array([round(float(s) / mk / 50) * 50 for s in bt_prices_all])
 
-    # Proxy market price at true vol with 4% risk premium
+    # Proxy market price at true forward vol with 4% risk premium
+    proxy_vols = np.array([
+        max(float(bt_true_all[i]) * 1.04 + proxy_rng.normal(0, 0.005), 0.01)
+        for i in range(len(bt_prices_all))
+    ])
     mkt_prices = np.array([
-        bsm_price(float(test_prices[i]), float(strikes[i]),
-                  T_OPT, R,
-                  max(float(test_true[i]) * 1.04 + proxy_rng.normal(0, 0.005), 0.01))
-        for i in range(len(test_prices))
+        bsm_price(float(bt_prices_all[i]), float(strikes[i]), T_OPT, R, proxy_vols[i])
+        for i in range(len(bt_prices_all))
     ])
 
-    # Pass K_offsets so implied vol is inverted at the same strike used to
-    # build the proxy market prices (round(S/mk/50)*50 per moneyness level)
+    # Lagged implied vol: invert yesterday's market price to price today's option.
+    # This avoids the circular error of inverting today's price and immediately
+    # re-pricing at that same vol (which gives zero error by construction).
+    raw_impl = np.array([
+        implied_vol(float(mkt_prices[i]), float(bt_prices_all[i]),
+                    float(strikes[i]), T_OPT, R)
+        for i in range(len(bt_prices_all))
+    ])
+    # Shift forward by 1: use yesterday's implied vol to price today's option
+    lagged_impl = np.concatenate([[raw_impl[0]], raw_impl[:-1]])
+
     df_bt = backtest_pricing(
-        prices=test_prices,
-        dates=test_dates,
-        hist_vols=hist_vols,
-        lstm_vols=lstm_vols,
+        prices=bt_prices_all,
+        dates=bt_dates_all,
+        hist_vols=bt_hist_all,
+        lstm_vols=bt_lstm_all,
         market_prices=mkt_prices,
         K_offsets=strikes,
         T=T_OPT, r=R,
+        lagged_impl_vols=lagged_impl,
     )
 
     summ = summarise_backtest(df_bt)
@@ -365,6 +438,7 @@ consolidated = {
     },
     "tc_sensitivity": df_tc.to_dict(orient="list"),
     "moneyness":      {k: v.to_dict() for k, v in all_summaries.items()},
+    "real_path_analysis": real_analysis,
 }
 with open(RESULTS / "bt_consolidated.json", "w") as f:
     json.dump(consolidated, f, indent=2)

@@ -24,7 +24,7 @@ but is accurate for short maturities and provides a tractable training signal.
 
 import numpy as np
 import gymnasium as gym
-from bsm import bsm_price, bsm_delta
+from bsm import bsm_price, bsm_delta, heston_price as _heston_price
 
 
 class HestonEnv(gym.Env):
@@ -44,6 +44,7 @@ class HestonEnv(gym.Env):
         V0:     float = 0.04,    # initial variance (same as theta → stationary start)
         n_steps: int  = 21,
         kappa_tc: float = 0.001, # proportional transaction cost
+        use_exact_pricing: bool = False,  # True → heston_price(); slow, eval only
     ):
         super().__init__()
 
@@ -59,6 +60,7 @@ class HestonEnv(gym.Env):
         self.n_steps = n_steps
         self.dt      = T / n_steps
         self.kappa_tc = kappa_tc
+        self.use_exact_pricing = use_exact_pricing
 
         # Cholesky factor for correlated Brownian motions
         self._rho_perp = np.sqrt(max(1.0 - rho ** 2, 1e-9))
@@ -84,15 +86,24 @@ class HestonEnv(gym.Env):
 
     def _get_obs(self) -> np.ndarray:
         tau = max(self.T - self.t * self.dt, 1e-9)
+        # Clip all components to declared observation_space bounds so the
+        # agent never sees out-of-distribution inputs during vol spikes.
         return np.array([
-            self.S / self.K,
-            tau / self.T,
-            self.delta_prev,
-            np.sqrt(max(self.V, 1e-9)) / np.sqrt(self.theta),
+            np.clip(self.S / self.K, 0.2, 5.0),
+            np.clip(tau / self.T,    0.0, 1.0),
+            np.clip(self.delta_prev, 0.0, 1.0),
+            np.clip(np.sqrt(max(self.V, 1e-9)) / np.sqrt(self.theta), 0.0, 5.0),
         ], dtype=np.float32)
 
     def _sigma_eff(self) -> float:
         return float(np.sqrt(max(self.V, 1e-6)))
+
+    def _option_price(self, S, tau):
+        """Price the option; use exact Heston if flag set, else BSM approx."""
+        if self.use_exact_pricing:
+            return _heston_price(S, self.K, tau, self.r, self.V,
+                                 self.kappa, self.theta, self.xi, self.rho)
+        return bsm_price(S, self.K, tau, self.r, self._sigma_eff())
 
     # ── Gym API ───────────────────────────────────────────────────────────────
 
@@ -111,8 +122,7 @@ class HestonEnv(gym.Env):
         self.episode_tc = 0.0
         self.S_prev     = self.S
 
-        sig0 = self._sigma_eff()
-        self.portfolio = bsm_price(self.S, self.K, self.T, self.r, sig0)
+        self.portfolio = self._option_price(self.S, self.T)
 
         return self._get_obs(), {}
 
@@ -127,7 +137,7 @@ class HestonEnv(gym.Env):
         self.S_prev = self.S   # stored for HestonItoEnv subclass
         V_prev      = self.V
 
-        V_before = bsm_price(S_prev, self.K, tau_before, self.r, sig)
+        V_before = self._option_price(S_prev, tau_before)
 
         # Transaction cost
         tc = self.kappa_tc * abs(delta_new - self.delta_prev) * S_prev
@@ -154,8 +164,7 @@ class HestonEnv(gym.Env):
         self.t += 1
 
         tau_after  = max(self.T - self.t * self.dt, 1e-9)
-        sig_after  = self._sigma_eff()
-        V_after    = bsm_price(self.S, self.K, tau_after, self.r, sig_after)
+        V_after    = self._option_price(self.S, tau_after)
 
         delta_S     = self.S - S_prev
         delta_V_opt = V_after - V_before

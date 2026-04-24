@@ -118,3 +118,78 @@ def crr_binomial(S, K, T, r, sigma, N=100, option='call',
             V = np.maximum(V, intrinsic)
 
     return float(V[0])
+
+
+# ---------------------------------------------------------------------------
+# Heston exact pricing  (semi-analytic, Heston 1993)
+# ---------------------------------------------------------------------------
+
+def heston_price(
+    S: float, K: float, tau: float, r: float,
+    V0: float, kappa: float, theta: float, xi: float, rho: float,
+    option: str = 'call',
+) -> float:
+    """
+    Exact Heston (1993) European call/put price via numerical integration
+    of the characteristic function.
+
+    Slow (~2 ms/call).  Use for evaluation metrics only, not inside training
+    loops.  Falls back to BSM(sqrt(V0)) on any numerical failure.
+    """
+    from scipy.integrate import quad
+
+    if tau < 1e-7 or S <= 0:
+        return bsm_price(S, K, max(tau, 0), r, max(np.sqrt(V0), 1e-4), option)
+
+    def _char(phi, j):
+        i   = 1j
+        u_j = 0.5 if j == 1 else -0.5
+        b_j = kappa - rho * xi if j == 1 else kappa
+        d   = np.sqrt((rho * xi * i * phi - b_j) ** 2
+                      - xi ** 2 * (2 * u_j * i * phi - phi ** 2))
+        g   = (b_j - rho * xi * i * phi + d) / (b_j - rho * xi * i * phi - d)
+        try:
+            exp_d = np.exp(d * tau)
+            denom_log = 1 - g * exp_d
+            numer_log = 1 - g
+            if abs(denom_log) < 1e-12 or abs(numer_log) < 1e-12:
+                raise ValueError
+            C = (r * i * phi * tau
+                 + kappa * theta / xi ** 2
+                 * ((b_j - rho * xi * i * phi + d) * tau
+                    - 2 * np.log(denom_log / numer_log)))
+            D = ((b_j - rho * xi * i * phi + d) / xi ** 2
+                 * (1 - exp_d) / (1 - g * exp_d))
+        except Exception:
+            return 0.0
+        return np.exp(C + D * V0 + i * phi * np.log(S))
+
+    def _integrand(phi, j):
+        f = _char(phi, j)
+        return float(np.real(np.exp(-1j * phi * np.log(K)) * f / (1j * phi)))
+
+    try:
+        P1 = 0.5 + quad(lambda p: _integrand(p, 1), 1e-6, 200,
+                        limit=200, epsabs=1e-4)[0] / np.pi
+        P2 = 0.5 + quad(lambda p: _integrand(p, 2), 1e-6, 200,
+                        limit=200, epsabs=1e-4)[0] / np.pi
+        call = float(S * P1 - K * np.exp(-r * tau) * P2)
+    except Exception:
+        return bsm_price(S, K, tau, r, max(np.sqrt(V0), 1e-4), option)
+
+    if option == 'call':
+        return max(call, 0.0)
+    return max(call - S + K * np.exp(-r * tau), 0.0)
+
+
+def heston_delta(
+    S: float, K: float, tau: float, r: float,
+    V0: float, kappa: float, theta: float, xi: float, rho: float,
+    eps: float = 0.5,
+) -> float:
+    """Heston delta via central finite difference on heston_price."""
+    if tau < 1e-7:
+        return 1.0 if S > K else 0.0
+    p_up   = heston_price(S + eps, K, tau, r, V0, kappa, theta, xi, rho)
+    p_down = heston_price(S - eps, K, tau, r, V0, kappa, theta, xi, rho)
+    return float((p_up - p_down) / (2 * eps))

@@ -84,7 +84,7 @@ def load_nifty(
 
     Columns returned
     ----------------
-    Close, log_ret, ret_sq,
+    Close, log_ret, abs_ret,
     rv5  : 5-day  rolling annualised vol
     rv21 : 21-day rolling annualised vol
     target_vol : forward 21-day realised vol (what we're forecasting)
@@ -105,7 +105,10 @@ def load_nifty(
         df.to_csv(cache_path)
 
     df["log_ret"] = np.log(df["Close"] / df["Close"].shift(1))
-    df["ret_sq"]  = df["log_ret"] ** 2
+    # abs_ret (|r|) rather than ret_sq (r²): both proxy instantaneous vol,
+    # but abs_ret has lower kurtosis so StandardScaler statistics are more
+    # stable — extreme crash days inflate ret_sq by ~64× vs a normal day.
+    df["abs_ret"] = df["log_ret"].abs()
 
     df["rv5"]  = df["log_ret"].rolling(5).std()  * np.sqrt(252)
     df["rv21"] = df["log_ret"].rolling(21).std() * np.sqrt(252)
@@ -116,8 +119,9 @@ def load_nifty(
     df["rv_ratio"] = np.clip(df["rv5"] / df["rv21"].replace(0, np.nan), 0.1, 10.0)
 
     # 5-day price momentum: signed cumulative return over the past week.
-    # Provides direction signal independent of vol magnitude.
-    df["mom5"] = df["log_ret"].rolling(5).sum()
+    # Clipped to ±0.30: beyond ±30% in 5 days is extreme crisis territory and
+    # would dominate the StandardScaler without adding forecasting value.
+    df["mom5"] = np.clip(df["log_ret"].rolling(5).sum(), -0.30, 0.30)
 
     # Target: forward-looking 21-day realised vol
     # shift(-21) so that on day t, the label is the vol over [t+1, t+21]
@@ -148,7 +152,7 @@ def make_sequences(
     dates : DatetimeIndex of length n_samples (date of the *last* row in each window)
     """
     if feature_cols is None:
-        feature_cols = ["log_ret", "ret_sq", "rv5", "rv21", "rv_ratio", "mom5"]
+        feature_cols = ["log_ret", "abs_ret", "rv5", "rv21", "rv_ratio", "mom5"]
 
     arr = df[feature_cols].values.astype(np.float32)
     tgt = df["target_vol"].values.astype(np.float32)
@@ -248,3 +252,35 @@ def load_processed():
         with open(scaler_path, "rb") as f:
             scaler = pickle.load(f)
     return splits, scaler
+
+
+def load_india_vix(
+    start: str = "2010-01-01",
+    end:   str = "2024-12-31",
+    cache: bool = True,
+) -> pd.Series:
+    """
+    Download India VIX daily closing values from Yahoo Finance (^INDIAVIX).
+
+    Returns a pd.Series of annualised implied vol as a decimal (e.g. 0.18
+    for 18%), indexed by date, aligned with NIFTY 50 trading days.
+    """
+    cache_path = DATA_DIR / "raw" / "india_vix.csv"
+
+    if cache and cache_path.exists() and cache_path.stat().st_size > 100:
+        s = pd.read_csv(cache_path, index_col=0, parse_dates=True).squeeze()
+    else:
+        raw = yf.download("^INDIAVIX", start=start, end=end,
+                          auto_adjust=True, progress=False)
+        if isinstance(raw.columns, pd.MultiIndex):
+            raw.columns = raw.columns.get_level_values(0)
+        s = raw["Close"].dropna()
+        if s.index.tz is not None:
+            s.index = s.index.tz_convert(None)
+        s.to_csv(cache_path, header=True)
+
+    # Convert from percentage (e.g. 18.0) to decimal (0.18) if > 2.0
+    if s.mean() > 2.0:
+        s = s / 100.0
+    s.name = "india_vix"
+    return s.sort_index()

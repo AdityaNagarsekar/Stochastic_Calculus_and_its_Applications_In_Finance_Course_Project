@@ -32,7 +32,7 @@ from pricing_pipeline import (
     backtest_pricing,
     summarise_backtest,
 )
-from bsm import bsm_price, crr_binomial
+from bsm import bsm_price, crr_binomial, implied_vol
 
 RESULTS = Path(__file__).parent.parent / "results"
 MODELS  = Path(__file__).parent.parent / "models"
@@ -174,6 +174,15 @@ print(f"  RMSE              : {garch_metrics['rmse']:.4f}")
 print(f"  MAE               : {garch_metrics['mae']:.4f}")
 print(f"  Directional acc.  : {garch_metrics['directional_accuracy']:.2%}")
 
+# ── Naive persistence baseline (rv21) ─────────────────────────────────────────
+# rv21 at date t = trailing 21-day realised vol = σ([t-20, t]).
+# target_vol at date t = forward 21-day realised vol = σ([t+1, t+21]).
+# These windows overlap by 18 days (86%), so rv21 is a strong predictor of
+# target_vol purely through vol clustering — not circularity.  Including it
+# as an explicit baseline contextualises both LSTM and the pricing horse race.
+rv21_naive = df.loc[splits["test"]["dates"], "rv21"].values.astype(np.float32)
+rv21_metrics = evaluate(y_true_test, rv21_naive)
+
 print(f"\nBenchmark comparison (test set):")
 print(f"  {'Model':<20} {'RMSE':>8} {'MAE':>8} {'Dir.Acc':>10}")
 print(f"  {'LSTM':<20} {metrics['rmse']:>8.4f} {metrics['mae']:>8.4f} "
@@ -181,30 +190,74 @@ print(f"  {'LSTM':<20} {metrics['rmse']:>8.4f} {metrics['mae']:>8.4f} "
 print(f"  {'GARCH(1,1)':<20} {garch_metrics['rmse']:>8.4f} "
       f"{garch_metrics['mae']:>8.4f} "
       f"{garch_metrics['directional_accuracy']:>10.2%}")
+print(f"  {'Naive rv21':<20} {rv21_metrics['rmse']:>8.4f} "
+      f"{rv21_metrics['mae']:>8.4f} "
+      f"{rv21_metrics['directional_accuracy']:>10.2%}")
 
 # Save combined metrics
-combined_metrics = {"lstm": metrics, "garch": garch_metrics}
+combined_metrics = {"lstm": metrics, "garch": garch_metrics, "rv21_naive": rv21_metrics}
+
+# ── India VIX baseline ────────────────────────────────────────────────────
+PROC = Path(__file__).parent.parent / "data" / "processed"
+print("\n--- India VIX baseline ---")
+from data_pipeline import load_india_vix
+
+try:
+    vix_series = load_india_vix()
+    # Align India VIX to test dates
+    test_dates_idx = splits["test"]["dates"]
+    # Forward-fill gaps (VIX not available on all dates)
+    vix_aligned = vix_series.reindex(test_dates_idx, method="ffill")
+    n_valid = vix_aligned.notna().sum()
+    print(f"  India VIX aligned: {n_valid}/{len(test_dates_idx)} dates")
+
+    if n_valid > 10:
+        vix_preds = vix_aligned.fillna(vix_aligned.mean()).values.astype(np.float32)
+        vix_metrics = evaluate(y_true_test, vix_preds)
+        print(f"  India VIX  RMSE={vix_metrics['rmse']:.4f}  "
+              f"MAE={vix_metrics['mae']:.4f}  "
+              f"dir_acc={vix_metrics['directional_accuracy']:.4f}")
+
+        # Save VIX preds for backtest
+        np.save(PROC / "vix_test_preds.npy", vix_preds)
+
+        # Add to combined metrics
+        combined_metrics["india_vix"] = vix_metrics
+    else:
+        print("  India VIX: insufficient aligned data — skipping")
+        vix_preds = None
+except Exception as e:
+    print(f"  India VIX download failed: {e}")
+    vix_preds = None
+
 with open(RESULTS / "p3_lstm_metrics.json", "w") as f:
     json.dump(combined_metrics, f, indent=2)
 
 # Save predictions for integration experiment (run_integration.py loads these)
-PROC = Path(__file__).parent.parent / "data" / "processed"
 np.save(PROC / "lstm_test_preds.npy",  y_pred_test.astype(np.float32))
 np.save(PROC / "lstm_train_preds.npy",
         predict(model, splits["train"]["X"]).astype(np.float32))
-print("Saved LSTM predictions to data/processed/")
+# Save GARCH preds so build_report_figures.py can generate the side-by-side scatter
+np.save(PROC / "garch_test_preds.npy", garch_preds.astype(np.float32))
+print("Saved LSTM + GARCH predictions to data/processed/")
 
-# Predicted vs actual scatter — LSTM and GARCH side by side
-fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+# Save val predictions for extended backtests (run_backtests.py uses val+test period)
+np.save(PROC / "lstm_val_preds.npy",
+        predict(model, splits["val"]["X"]).astype(np.float32))
+print("Saved lstm_val_preds.npy")
+
+# Predicted vs actual scatter — LSTM, GARCH, and naive rv21
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 for ax, preds, title in [
-    (axes[0], y_pred_test, f"LSTM  (RMSE={metrics['rmse']:.4f})"),
-    (axes[1], garch_preds, f"GARCH(1,1)  (RMSE={garch_metrics['rmse']:.4f})"),
+    (axes[0], y_pred_test, f"LSTM  (MAE={metrics['mae']:.4f})"),
+    (axes[1], garch_preds, f"GARCH(1,1)  (MAE={garch_metrics['mae']:.4f})"),
+    (axes[2], rv21_naive,  f"Naive rv21  (MAE={rv21_metrics['mae']:.4f})"),
 ]:
     lims = [min(y_true_test.min(), preds.min()),
             max(y_true_test.max(), preds.max())]
     ax.scatter(y_true_test, preds, alpha=0.25, s=5)
     ax.plot(lims, lims, "r--", lw=1)
-    ax.set_xlabel("Realised vol")
+    ax.set_xlabel("Realised fwd vol (target)")
     ax.set_ylabel("Forecast")
     ax.set_title(title)
 plt.suptitle("Predicted vs Actual vol (test set)", fontsize=12)
@@ -213,13 +266,14 @@ fig.savefig(RESULTS / "p3_lstm_scatter.png", dpi=150)
 plt.close(fig)
 print("Saved p3_lstm_scatter.png")
 
-# Vol forecast time series — LSTM vs GARCH vs realised
+# Vol forecast time series — LSTM vs GARCH vs rv21 vs realised
 fig, ax = plt.subplots(figsize=(12, 4))
-ax.plot(splits["test"]["dates"], y_true_test,  label="Realised vol",   lw=1.5)
-ax.plot(splits["test"]["dates"], y_pred_test,  label="LSTM forecast",  lw=1.5, ls="--")
-ax.plot(splits["test"]["dates"], garch_preds,  label="GARCH(1,1)",     lw=1.2, ls=":", alpha=0.85)
+ax.plot(splits["test"]["dates"], y_true_test,  label="Realised fwd vol",  lw=1.5)
+ax.plot(splits["test"]["dates"], y_pred_test,  label="LSTM forecast",     lw=1.5, ls="--")
+ax.plot(splits["test"]["dates"], garch_preds,  label="GARCH(1,1)",        lw=1.2, ls=":",  alpha=0.85)
+ax.plot(splits["test"]["dates"], rv21_naive,   label="Naive rv21",        lw=1.0, ls="-.", alpha=0.75)
 ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
-ax.set_title("Vol Forecast: LSTM vs GARCH(1,1) vs Realised (test set)")
+ax.set_title("Vol Forecast: LSTM vs GARCH(1,1) vs Naive rv21 vs Realised (test set)")
 ax.legend()
 plt.tight_layout()
 fig.savefig(RESULTS / "p3_vol_forecast.png", dpi=150)
@@ -438,6 +492,15 @@ assert bt_lstm.max() > 0.01, (
     "The LSTM model may not have been trained correctly."
 )
 
+# Compute 1-day-lagged implied vols to avoid circular pricing error
+# (same-day inversion gives zero error by construction)
+raw_impl = np.array([
+    implied_vol(float(market_prices[i]), float(bt_prices[i]),
+                float(bt_k_offsets[i]), T_opt, r_opt)
+    for i in range(len(bt_prices))
+])
+lagged_impl = np.concatenate([[raw_impl[0]], raw_impl[:-1]])
+
 df_bt = backtest_pricing(
     prices=bt_prices,
     dates=bt_dates,
@@ -448,6 +511,7 @@ df_bt = backtest_pricing(
     T=T_opt,
     r=r_opt,
     garch_vols=bt_garch,
+    lagged_impl_vols=lagged_impl,
 )
 
 summary = summarise_backtest(df_bt)
@@ -457,6 +521,24 @@ print(summary.to_string())
 df_bt.to_csv(RESULTS / "p3_pricing_backtest.csv", index=False)
 summary.to_csv(RESULTS / "p3_pricing_summary.csv")
 print("Saved p3_pricing_backtest.csv, p3_pricing_summary.csv")
+
+# India VIX pricing backtest (if available)
+if vix_preds is not None:
+    df_vix_backtest = backtest_pricing(
+        prices=bt_prices, dates=bt_dates,
+        hist_vols=bt_hist, lstm_vols=bt_lstm,
+        market_prices=market_prices, K_offsets=bt_k_offsets,
+        T=T_opt, r=r_opt, garch_vols=bt_garch,
+        vix_vols=vix_preds,
+    )
+    sum_vix = summarise_backtest(df_vix_backtest)
+    print("\nPricing results (with India VIX):")
+    print(sum_vix[["mae","mean_error"]].to_string())
+    df_vix_backtest.to_csv(RESULTS / "p3_pricing_vix_backtest.csv", index=False)
+
+with open(RESULTS / "p3_lstm_metrics.json", "w") as f:
+    json.dump(combined_metrics, f, indent=2)
+print("Saved updated p3_lstm_metrics.json")
 
 # Pricing error bar chart
 fig, ax = plt.subplots(figsize=(7, 4))

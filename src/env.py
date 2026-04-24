@@ -3,6 +3,7 @@ Project 1 — Gym environment for delta-hedging under GBM.
 
 State  : (moneyness S/K, normalised time-to-expiry tau/T, current delta)
          optionally + dollar-gamma Γ·S (gamma_obs=True, idea 3)
+         optionally + observed sigma proxy (sigma_obs=True)
 Action : new hedge ratio in [0, 1]
 Reward : −(hedging error)² − transaction cost
 
@@ -12,6 +13,10 @@ high (near-ATM, near-expiry) and adjust rebalancing accordingly.
 
 Optionally accepts a sigma_schedule (array of per-step vol forecasts from
 the LSTM) to enable the Project 1 + 3 integration experiment.
+
+sigma_range : tuple (lo, hi) — if provided, σ is sampled uniformly from
+              [lo, hi] at the start of each episode (domain randomization).
+              Overrides the fixed sigma parameter each episode.
 """
 
 import gymnasium as gym
@@ -34,6 +39,8 @@ class HedgingEnv(gym.Env):
         sigma_schedule=None,           # optional array of per-step LSTM vols
         ito_reward: bool = False,      # use Itô-decomposed reward (idea 2)
         gamma_obs: bool = False,       # append dollar-gamma Γ·S to obs (idea 3)
+        sigma_obs: bool = False,       # append sigma proxy to obs
+        sigma_range: tuple = None,     # (lo, hi) → sample σ each episode
     ):
         super().__init__()
 
@@ -48,18 +55,28 @@ class HedgingEnv(gym.Env):
         self.sigma_schedule = sigma_schedule  # None → constant vol
         self.ito_reward = ito_reward
         self.gamma_obs  = gamma_obs
+        self.sigma_obs  = sigma_obs
+        self.sigma_range = sigma_range
 
-        # Observation: [moneyness, tau_normalised, delta_prev] + optional [gamma*S]
+        # Observation: [moneyness, tau_normalised, delta_prev]
+        # plus optional [gamma*S] and/or [sigma_proxy].
+        low = [0.2, 0.0, 0.0]
+        high = [5.0, 1.0, 1.0]
         if gamma_obs:
-            self.observation_space = gym.spaces.Box(
-                low=np.array( [0.2, 0.0, 0.0, 0.0], dtype=np.float32),
-                high=np.array([5.0, 1.0, 1.0, 5.0], dtype=np.float32),
-            )
-        else:
-            self.observation_space = gym.spaces.Box(
-                low=np.array([0.2, 0.0, 0.0], dtype=np.float32),
-                high=np.array([5.0, 1.0, 1.0], dtype=np.float32),
-            )
+            # Normalized dollar-gamma: phi(d1)/phi(0) in [0, 1].
+            # Raw gamma*S at ATM near-expiry ≈ 32 with σ=0.20 — well above [0,5],
+            # so the old bound was clipping away the most important regime.
+            # phi(d1)/phi(0) = gamma*S*sigma*sqrt(tau) / 0.3989, always in [0,1].
+            low.append(0.0)
+            high.append(1.5)   # 1.5 gives headroom for numerical noise
+        if sigma_obs:
+            # Sigma proxy normalized to a 20% reference volatility.
+            low.append(0.0)
+            high.append(5.0)
+        self.observation_space = gym.spaces.Box(
+            low=np.array(low, dtype=np.float32),
+            high=np.array(high, dtype=np.float32),
+        )
         # Action: continuous hedge ratio in [0, 1]
         self.action_space = gym.spaces.Box(
             low=np.array([0.0], dtype=np.float32),
@@ -86,12 +103,21 @@ class HedgingEnv(gym.Env):
     def _get_obs(self) -> np.ndarray:
         tau = max(self.T - self.t * self.dt, 1e-9)
         sig = self._get_sigma()
-        obs = [self.S / self.K, tau / self.T, self.delta_prev]
+        # Clip all components to declared observation_space bounds — prevents
+        # out-of-range observations under domain randomization (high-σ paths).
+        obs = [
+            float(np.clip(self.S / self.K, 0.2, 5.0)),
+            float(np.clip(tau / self.T,    0.0, 1.0)),
+            float(np.clip(self.delta_prev, 0.0, 1.0)),
+        ]
         if self.gamma_obs:
-            # Dollar-gamma Γ·S: high near ATM + near expiry, low otherwise.
-            # Clipped to [0, 5] to match observation_space bounds.
             gamma_t = bsm_gamma(self.S, self.K, tau, self.r, sig)
-            obs.append(float(np.clip(gamma_t * self.S, 0.0, 5.0)))
+            # phi(d1)/phi(0) = gamma*S*sigma*sqrt(tau) / 0.3989
+            # Bounded in [0, 1] by construction; 1.0 at ATM regardless of tau or sig.
+            phi_d1_norm = gamma_t * self.S * sig * np.sqrt(tau) / 0.3989
+            obs.append(float(np.clip(phi_d1_norm, 0.0, 1.5)))
+        if self.sigma_obs:
+            obs.append(float(np.clip(sig / 0.20, 0.0, 5.0)))
         return np.array(obs, dtype=np.float32)
 
     # ------------------------------------------------------------------
@@ -100,6 +126,10 @@ class HedgingEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+
+        if self.sigma_range is not None:
+            lo, hi = self.sigma_range
+            self.sigma = float(self.np_random.uniform(lo, hi))
 
         # Randomise starting spot ±10 % to generalise across moneyness
         self.S = self.S0 * self.np_random.uniform(0.90, 1.10)

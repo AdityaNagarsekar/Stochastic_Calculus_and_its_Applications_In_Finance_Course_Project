@@ -98,10 +98,19 @@ def backtest_pricing(
     r:            float = 0.065,
     option:       str = "call",
     garch_vols:   np.ndarray | None = None,  # optional GARCH(1,1) forecast vol
+    vix_vols:     np.ndarray | None = None,  # optional India VIX vol
+    lagged_impl_vols: np.ndarray | None = None,  # pre-computed 1-day-lagged implied vols
 ) -> pd.DataFrame:
     """
     For each date in the test set, price an ATM call under three vol
     sources and compare to the observed market price.
+
+    The 'implied' method uses lagged_impl_vols when provided (yesterday's
+    implied vol applied to today's option) — this avoids the circular error
+    of inverting today's market price and then re-pricing at that same vol.
+    When lagged_impl_vols is None the function falls back to same-day
+    inversion (which gives zero error by construction; only valid for
+    real-data pipelines where market_prices come from a different source).
 
     Returns a DataFrame with columns:
       date, method, sigma, model_price, market_price, error, pct_error
@@ -116,14 +125,22 @@ def backtest_pricing(
 
         sig_hist  = float(hist_vols[i])
         sig_lstm  = float(lstm_vols[i])
-        sig_impl  = implied_vol(mkt, S, K, T, r, option)
+        # Use pre-computed lagged implied vol when available; otherwise invert
+        # same-day market price (only non-circular when mkt is real observed data).
+        if lagged_impl_vols is not None:
+            sig_impl = float(lagged_impl_vols[i])
+        else:
+            sig_impl = implied_vol(mkt, S, K, T, r, option)
         sig_garch = float(garch_vols[i]) if garch_vols is not None else None
+        sig_vix = float(vix_vols[i]) if vix_vols is not None else None
 
         candidates = [("historical", sig_hist),
                       ("lstm",       sig_lstm),
                       ("implied",    sig_impl)]
         if sig_garch is not None:
             candidates.append(("garch", sig_garch))
+        if sig_vix is not None:
+            candidates.append(("india_vix", sig_vix))
 
         for method, sig in candidates:
             if np.isnan(sig) or sig <= 0:
