@@ -15,6 +15,8 @@
 \usepackage{array}
 \usepackage{multirow}
 \usepackage[numbers,sort&compress]{natbib}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc}
 
 \graphicspath{{./report_figures/}}
 
@@ -69,8 +71,11 @@ trained in a varying-$\sigma$ environment achieves $\mathbf{MAE = 0.407}$
 versus $1.435$ for a constant-$\sigma$ baseline when evaluated in their shared
 natural habitat (72\% reduction, $p < 0.001$ by paired bootstrap).  On 51
 non-overlapping windows of real Nifty paths spanning 2020--2024, BSM daily
-hedging (MAE 105.1) outperforms RL (MAE 137.5, $p=0.013$), and both strategies
-deteriorate sharply above transaction cost $\kappa = 0.003$.
+hedging with rv21 (MAE 105.1) outperforms RL (MAE 137.5, $p=0.013$); replacing
+rv21 by the LSTM forecast improves the analytic hedge to MAE 96.1, and a mixed
+partial-rebalancing rule around the BSM-LSTM target achieves the best real-path
+MAE of 88.3.  All strategies deteriorate sharply above transaction cost
+$\kappa = 0.003$.
 
 %──────────────────────────────────────────────────────────────────────────────
 \section{Introduction}
@@ -123,8 +128,105 @@ and Greeks ($\Delta$, $\Gamma$, $\mathcal{V}$):
   \item[Part IV]  LSTM--RL integration with a natural-habitat evaluation that
         corrects a distributional alignment issue present in naive comparison.
   \item[Part V]  Extended real-path backtesting: 51 non-overlapping windows,
-        transaction-cost sensitivity, and moneyness stress tests.
+        including analytic, RL, and mixed BSM--LSTM execution rules, plus
+        transaction-cost sensitivity and moneyness stress tests.
 \end{description}
+
+\begin{figure}[t]
+\centering
+\resizebox{0.88\textwidth}{!}{%
+\begin{tikzpicture}[
+  >=Stealth,
+  arr/.style={-Stealth, very thick, rounded corners=5pt,
+              shorten >=4pt, shorten <=4pt},
+  darr/.style={-Stealth, thick, dashed, rounded corners=5pt,
+               shorten >=4pt, shorten <=4pt},
+  fbox/.style={draw, line width=0.8pt, rounded corners=6pt,
+               text width=13.0cm, align=center,
+               font=\small, inner sep=7pt},
+  lbox/.style={draw, line width=0.8pt, rounded corners=6pt,
+               fill=blue!10, text width=5.4cm, align=center,
+               font=\small, inner sep=7pt},
+  rbox/.style={draw, line width=0.8pt, rounded corners=6pt,
+               fill=purple!8, text width=5.4cm, align=center,
+               font=\small, inner sep=7pt},
+  mbox/.style={draw, line width=0.8pt, rounded corners=6pt,
+               fill=teal!11, text width=8.8cm, align=center,
+               font=\small, inner sep=7pt},
+]
+
+\node[fbox, fill=gray!10] (data) at (0,0) {%
+  \textbf{Nifty 50 Index Data} \quad (Yahoo Finance, 2010--2024, $\approx$3700 trading days)\\[2pt]
+  Chronological split: 70\% train \quad | \quad 15\% validation \quad | \quad 15\% test};
+
+\node[lbox] (p3) at (-3.9,-4.8) {%
+  \textbf{Part III: LSTM Volatility Forecasting}\\[6pt]
+  2-layer LSTM (64 + 32)\\
+  Inputs: returns, realized vol, vol ratio, momentum\\
+  Target: 21-day forward realized vol\\
+  Sequence length: 60 days\\[4pt]
+  \textit{LSTM MAE 0.0114} \quad \textit{($-41\%$ vs.\ GARCH)}};
+
+\node[rbox] (p12) at (3.9,-4.8) {%
+  \textbf{Parts I \& II: RL Delta Hedging}\\[6pt]
+  PPO trained in GBM and Heston\\
+  Six ablations: reward, environment, observation,
+  training distribution\\[4pt]
+  \textit{Best RL (domain randomization): MAE 0.723}\\
+  \textit{BSM daily: MAE 0.284}};
+
+\node[mbox] (p4) at (0,-10.4) {%
+  \textbf{Part IV: LSTM--RL Integration}\\[6pt]
+  LSTM $\hat\sigma_t$ replaces fixed $\sigma$ in the RL environment\\
+  Natural-habitat evaluation corrects the constant-$\sigma$ mismatch\\[4pt]
+  \textit{LSTM-RL: $-72\%$ MAE and $-64\%$ CVaR$_{95}$ vs.\ constant-$\sigma$ RL}\\
+  \textit{BSM-LSTM still beats LSTM-RL: 0.227 vs.\ 0.407}};
+
+\node[fbox, fill=orange!8] (p5) at (0,-15.4) {%
+  \textbf{Part V: Real-Path Backtesting on Nifty 50 (2020--2024)}\\[6pt]
+  51 non-overlapping 21-day windows \quad | \quad $\kappa = 0.001$\\[4pt]
+  \textbf{Head-to-head strategies:} BSM (rv21), RL PPO (rv21), BSM-LSTM, Partial-BSM-LSTM\\[4pt]
+  Additional checks: transaction-cost sensitivity, moneyness, and tail risk};
+
+\node[fbox, fill=green!7] (res) at (0,-19.2) {%
+  \textbf{Best real-path result:}\quad
+  Partial-BSM-LSTM\;\textbf{MAE 88.3}
+  $\;\big|\;$ BSM-LSTM 96.1
+  $\;\big|\;$ BSM daily 105.1
+  $\;\big|\;$ RL PPO 137.5\\[4pt]
+  \textbf{Conclusion:}
+  analytic structure $+$ learned volatility $+$ cost-aware partial rebalancing
+  $\;\boldsymbol{>}\;$ stand-alone RL on every metric};
+
+\draw[arr] (data.south) -- ++(0,-0.7) -| (p3.north);
+\draw[arr] (data.south) -- ++(0,-0.7) -| (p12.north);
+\draw[arr] (p3.south) -- (p3.south |- p4.north);
+\draw[arr] (p12.south) -- (p12.south |- p4.north);
+\draw[arr] (p4.south) -- (p5.north);
+\draw[arr] (p5.south) -- (res.north);
+
+\draw[darr] (p3.west) -- ++(-1.0,0) |- (p5.west);
+\node[font=\small, rotate=90, fill=white, inner sep=1.5pt]
+  at (-6.7,-10.0) {LSTM $\hat\sigma_t$ to Part V};
+
+\draw[darr] (p12.east) -- ++(1.0,0) |- (p5.east);
+\node[font=\small, rotate=-90, fill=white, inner sep=1.5pt]
+  at (6.7,-10.0) {PPO policy to Part V};
+
+\end{tikzpicture}}% end resizebox
+\caption{Full project flow across all five parts.
+\textbf{Gray (top)}: shared Nifty 50 data.
+\textbf{Blue (Part III)}: LSTM forecasts 21-day forward realised volatility;
+its outputs $\hat\sigma_t$ feed both Part IV and (left dashed bypass) the
+BSM-LSTM/Partial-BSM-LSTM strategies in Part V.
+\textbf{Purple (Parts I \& II)}: PPO trained in simulation with six design
+ablations; the agent is also evaluated on real paths in Part V (right dashed bypass).
+\textbf{Teal (Part IV)}: natural-habitat evaluation corrects distributional
+shift — both agents are tested in the LSTM's varying-$\sigma$ environment.
+\textbf{Orange (Part V)}: all strategies compared on 51 real Nifty windows.
+\textbf{Green (bottom)}: best result is a structured hybrid, not stand-alone RL.}
+\label{fig:project_flow}
+\end{figure}
 
 %──────────────────────────────────────────────────────────────────────────────
 \section{Mathematical Foundations}
@@ -159,6 +261,43 @@ Over one discrete step $\Delta t$ this becomes:
 \end{equation}
 Equation~\eqref{eq:log_euler} is the step used in the simulation environment ---
 it is exact under GBM, not an approximation.
+
+\subsection{Martingales and the Risk-Neutral Measure}
+\label{sec:martingale}
+
+A stochastic process $\{M_t\}$ is a \textbf{martingale} under measure
+$\mathbb{P}$ with respect to $\{\mathcal{F}_t\}$ if
+$\mathbb{E}^\mathbb{P}[M_t\,|\,\mathcal{F}_s] = M_s$ for all $s \le t$ ---
+the process has no predictable drift.  Under $\mathbb{P}$, $S_t$ drifts at
+rate $\mu$ and is not a martingale.
+
+\textbf{Girsanov's theorem} guarantees the existence of a unique
+equivalent measure $\mathbb{Q}$ (the \emph{risk-neutral measure}) under which
+the discounted stock price $e^{-rt}S_t$ \emph{is} a martingale.
+The change of measure is given by the Radon--Nikod\'{y}m derivative:
+\begin{equation}
+  \frac{d\mathbb{Q}}{d\mathbb{P}}\bigg|_{\mathcal{F}_T}
+  = \exp\!\Bigl(-\theta\,W_T - \tfrac12\theta^2 T\Bigr),
+  \quad \theta = \frac{\mu-r}{\sigma},
+  \label{eq:girsanov}
+\end{equation}
+where $\theta$ is the \textbf{market price of risk}.  Under $\mathbb{Q}$,
+$\tilde{W}_t = W_t + \theta t$ is a standard Brownian motion, so
+equation~\eqref{eq:gbm} becomes $dS_t = r S_t\,dt + \sigma S_t\,d\tilde{W}_t$.
+
+The martingale property of $e^{-rt}S_t$ immediately gives the
+\textbf{fundamental pricing formula}:
+\begin{equation}
+  V_0 = e^{-rT}\,\mathbb{E}^{\mathbb{Q}}[(S_T - K)^+],
+  \label{eq:risk_neutral_price}
+\end{equation}
+which is the discounted risk-neutral expectation of the terminal payoff.
+Equation~\eqref{eq:risk_neutral_price} is the theoretical foundation for
+option pricing throughout this project: the BSM formula~\eqref{eq:bsm} is
+the closed-form evaluation of this expectation under GBM, and the Heston
+formula~\eqref{eq:heston_price} evaluates it under stochastic volatility
+via the Gil-Pelaez inversion.  No-arbitrage pricing is therefore equivalent
+to finding the unique $\mathbb{Q}$ that makes discounted asset prices martingales.
 
 \subsection{It\^{o}'s Lemma and the Black-Scholes PDE}
 
@@ -235,7 +374,7 @@ Over step $\Delta t$ with hedge ratio $\delta$ (possibly $\neq\Delta^*$):
 The gamma term has $\mathbb{E}[(\Delta S)^2] = \sigma^2 S^2\Delta t$ under
 GBM (It\^{o}'s isometry), so its expectation is zero.
 \emph{No choice of $\delta$ eliminates it.}
-Its variance is $\tfrac12\sigma^4 S^4\Gamma^2\Delta t$, which peaks at-the-money
+Its variance is $\tfrac12\sigma^4 S^4\Gamma^2(\Delta t)^2$, which peaks at-the-money
 near expiry where $\Gamma$ is large.  Decomposition~\eqref{eq:hedge_decomp}
 motivates both the It\^{o} reward (Section~\ref{sec:ito_reward}) and the gamma
 observation (Section~\ref{sec:gamma_obs}).
@@ -288,6 +427,14 @@ Variance uses the full-truncation Euler scheme~\citep{Andersen2008}:
   \label{eq:heston_euler}
 \end{equation}
 
+The first term $\kappa(\theta-V_t)\Delta t$ is the \textbf{mean-reversion drift}:
+when $V_t<\theta$ it pushes variance upward; when $V_t>\theta$ it pulls it down.
+The second term $\xi\sqrt{V_t}\sqrt{\Delta t}\,Z_2$ is the \textbf{stochastic
+shock}, whose magnitude scales with $\sqrt{V_t}$ so vol-of-vol is amplified in
+high-variance regimes.  The $\max(\cdot,10^{-6})$ floor is a numerical safeguard:
+a large negative draw can make the Euler update negative, invalidating
+$\sqrt{V_t}$, so truncation is applied rather than reflection.
+
 \textbf{Semi-analytic pricing.}
 The Heston characteristic function is:
 \begin{align}
@@ -316,6 +463,15 @@ The call price follows from Gil-Pelaez inversion:
 Numerical integration uses \texttt{scipy.integrate.quad} on $[10^{-6},200]$
 with 200 subdivisions and absolute tolerance $10^{-4}$.
 
+\textbf{Why the characteristic function?}  Under Heston, $S_T$ is not
+log-normal, so $\mathbb{E}[(S_T-K)^+]$ has no elementary closed form.
+However, the characteristic function $\Psi(\phi)=\mathbb{E}[e^{i\phi\ln S_T}]$
+\emph{is} available in closed form for affine models --- the pricing PDE
+becomes an ODE in Fourier space with solution $(C_j, D_j)$.  Gil-Pelaez
+inversion then recovers the two risk-neutral probabilities $P_1, P_2$
+via numerical quadrature, giving the same structural decomposition as BSM
+($C = SP_1 - Ke^{-r\tau}P_2$) but with Fourier integrals replacing $\Phi(d_1), \Phi(d_2)$.
+
 %──────────────────────────────────────────────────────────────────────────────
 \section{Part I: RL Delta Hedging Under GBM}
 \label{sec:p1}
@@ -333,7 +489,12 @@ $n=21$ discrete steps ($T = 21/252$ years, one trading month).
   \item[Action] $a_t = \delta_t \in [0,1]$, the new hedge ratio.
   \item[Dynamics] Exact log-Euler GBM step~\eqref{eq:log_euler}.
   \item[Reward] $r_t = -\varepsilon_t^2 - \kappa|\delta_t-\delta_{t-1}|S_t$,
-    with $\kappa = 0.001$.
+    with $\kappa = 0.001$.  The squared error penalises large mistakes
+    disproportionately (risk-sensitive) and corresponds to the
+    \emph{variance-optimal hedging} objective from stochastic control theory.
+    The second term imposes a proportional transaction cost equal to the
+    dollar volume traded; without it, the agent would rebalance at every step
+    with no regard for cost.
   \item[Initialisation] $S_0\sim\mathrm{Uniform}(0.9K,\,1.1K)$;
     portfolio funded at BSM price $C(S_0,T,r,\sigma)$.
 \end{description}
@@ -366,6 +527,14 @@ $\hat{A}_t$ is the Generalised Advantage Estimate~\citep{Schulman2016}
 ($\lambda_{\mathrm{GAE}}=0.95$).  Training: $\gamma=0.99$, lr$=10^{-4}$
 (Adam), 300,000 environment steps.
 
+The clipping mechanism prevents destructive policy updates: when
+$r_t > 1+\varepsilon$ (large probability increase), the objective is capped so
+further increase yields no additional gradient, and symmetrically for
+$r_t < 1-\varepsilon$.  In a noisy financial reward (driven by $(\Delta S)^2$
+and gamma noise), unconstrained policy gradient can oscillate wildly;
+PPO's conservative updates are the primary reason the agent converges to a
+stable hedging policy.
+
 \subsection{BSM Baselines}
 
 \texttt{BSM daily}: at each step set $\delta_t = \Delta^* = \Phi(d_1)$
@@ -379,7 +548,11 @@ from the Nifty test period (Section~\ref{sec:p3}).
 
 \textbf{Bootstrap baseline}: episodes use 21 consecutive real Nifty
 log-returns (block bootstrap from test period) as the price path; BSM delta is
-applied at the rolling-21d realised vol.  Tests real-returns departure from GBM.
+applied at the rolling-21d realised vol.  Unlike random IID sampling, the block
+bootstrap preserves the autocorrelation and vol-clustering structure of actual
+market returns.  Its higher MAE relative to GBM-BSM directly measures the
+cost of model misspecification: the gap arises from fat tails, vol clustering,
+and non-normality that GBM-trained strategies have never encountered.
 
 \subsection{Results}
 
@@ -446,6 +619,16 @@ near expiry where $\Gamma$ is large.
 LSTM-guided BSM achieves the best MAE (0.227, $-20.2\%$ vs.\ BSM daily,
 $p<0.001$).  It dominates at every utility score $J_\lambda$, confirming the
 improvement is not an artifact of lower transaction costs.
+This result may seem surprising: BSM is analytically optimal under constant
+GBM, so how can replacing $\sigma=0.20$ with LSTM forecasts help?  The answer
+is that discrete-time hedging performance is sensitive to \emph{pathwise}
+volatility: over a 21-step episode, realised vol fluctuates around the true
+$0.20$, and a delta computed at the wrong local $\sigma$ introduces controllable
+error in the first term of decomposition~\eqref{eq:hedge_decomp}.  The LSTM
+forecast tracks these regime fluctuations, reducing $|\delta_t - \Delta^*_t|$
+when vol temporarily spikes or subsides.  This is the per-step Vega effect:
+a 1 percentage-point vol correction reduces the pricing error by
+$\mathcal{V}\cdot 0.01$, which compounds across all 21 rebalancing steps.
 
 BSM weekly correctly shows the accuracy-cost tradeoff: MAE $+75\%$ but TC
 $-33\%$.  At $\lambda=5$ (high cost-sensitivity), the utility $J=0.987$ is
@@ -476,9 +659,11 @@ at higher transaction costs.
 \label{sec:novel}
 %──────────────────────────────────────────────────────────────────────────────
 
-Six experiments systematically vary the reward function, environment, observation
-space, and training distribution.  All use the same PPO hyperparameters
-unless stated.
+Part~I established that RL cannot beat the analytic BSM hedge under GBM, but
+left open the question of \emph{why}: is it the reward signal, the environment,
+the observation space, or the training distribution?  Part~II answers this
+through six ablations that vary each design choice in turn.  All experiments use
+the same PPO hyperparameters as Part~I unless stated.
 
 \subsection{Experiment A: GBM + MSE Reward (Baseline)}
 
@@ -495,7 +680,7 @@ P\&L
   G_t = \tfrac12\Gamma_t\bigl[(\Delta S)^2 - \sigma^2 S_t^2\Delta t\bigr]
   \label{eq:gamma_pnl}
 \end{equation}
-has $\mathbb{E}[G_t] = 0$ but $\mathrm{Var}(G_t) = \tfrac12\sigma^4 S^4\Gamma^2\Delta t >0$.
+has $\mathbb{E}[G_t] = 0$ but $\mathrm{Var}(G_t) = \tfrac12\sigma^4 S^4\Gamma^2(\Delta t)^2 >0$.
 It adds variance to the per-step reward that the agent cannot reduce.
 The It\^{o} reward subtracts $G_t$ before squaring:
 \begin{equation}
@@ -509,6 +694,11 @@ bootstrap).  At convergence $\delta\to\Delta^*$, the hedge error $\varepsilon_t$
 signal to zero, removing the gradient.  Additionally, $\Gamma_t\to\infty$ as
 $\tau\to 0$ (ATM near-expiry), causing numerical noise in $G_t$ that
 overwhelms the variance-reduction benefit.
+In short, the It\^{o} reward \emph{removes noise but also removes signal}: the
+original $-\varepsilon_t^2$ reward, though noisy, retains a nonzero gradient
+even near optimum.  The It\^{o} reward becomes essentially flat when
+$\delta\approx\Delta^*$, starving the policy of learning signal precisely when
+it is close to the correct solution.
 
 \subsection{Experiment C: Heston + MSE Reward}
 
@@ -559,6 +749,11 @@ Training is extended to 500k steps (vs.\ 300k for A--D) to ensure convergence.
 of 17.5\%, $p<0.001$).  Extended training alone accounts for part of this
 improvement; the gamma observation provides structural signal that accelerates
 learning in high-$\Gamma$ regimes.
+The contrast with Experiment B is instructive: the It\^{o} reward alone hurts
+because it weakens the gradient without replacing it with structure.  Adding
+$\gamma^{\mathrm{obs}}$ solves this: the agent now knows \emph{where} errors
+are most costly (high-$\Gamma$ ATM near expiry) and can focus its accuracy
+budget on those states, making the weaker but cleaner reward signal sufficient.
 
 \subsection{Experiment F: Domain Randomisation ($\sigma\sim U(0.10,0.40)$)}
 
@@ -677,7 +872,11 @@ rather than a single point.
 \label{sec:p3}
 %──────────────────────────────────────────────────────────────────────────────
 
-\subsection{Why Volatility Forecasting Matters}
+\subsection{Motivation: Why Volatility Forecasting Matters}
+
+Parts~I and~II showed that RL's difficulty partly stems from using a fixed,
+misspecified $\sigma$.  Part~III addresses this directly: if we can supply better
+volatility inputs to the analytic hedge, how much does performance improve?
 
 BSM price is monotone in $\sigma$.  A vol forecast error $\Delta\sigma$
 translates to a pricing error of magnitude $\mathcal{V}\cdot|\Delta\sigma|$.
@@ -705,10 +904,14 @@ substantial relative to option premiums of \$1--\$3.  The Vega surface
   \mathrm{mom}_5(t) &= \sum_{i=1}^5 r_{t-i+1}
     \;\text{(clipped to $\pm0.30$)}.
 \end{align}
-The \texttt{rv\_ratio} captures the vol term structure: values $>1$ indicate
-a vol spike (short above long), values $<1$ a subsiding regime.  GARCH has no
-equivalent multi-horizon feature, and this is likely the primary driver of
-LSTM's advantage.  Features are StandardScaled using train-set statistics only.
+The \texttt{rv\_ratio} captures the \textbf{volatility term structure}: values
+$>1$ signal a spike (short-horizon vol exceeds long-horizon trend), values $<1$
+a cooling regime.  This is the single most informative feature because
+it encodes \emph{regime change} rather than just level, which is precisely what
+persistence-based models like GARCH miss.  GARCH maintains a single variance
+state; the LSTM sees the relative dynamics across two horizons and can
+distinguish ``vol is high but falling'' from ``vol is high and rising.''
+Features are StandardScaled using train-set statistics only.
 
 \textbf{Target.} Forward 21-day realised volatility:
 \begin{equation}
@@ -786,21 +989,37 @@ risk-neutral implied vol and includes a variance risk premium.
 
   \item \textbf{rv21 outperforms LSTM} (MAE 0.0043 vs.\ 0.0114).  This is
         expected and not a modelling failure.  The trailing 21-day window
-        $[t-20, t]$ covers 86\% of the same observations as the forward target
-        $[t+1, t+21]$.  Under Nifty's strong vol clustering (Hurst exponent
-        $\approx0.65$), simple persistence is a powerful short-horizon predictor.
-        The rv21 baseline is included as a transparency control, not as a
-        benchmark the LSTM must beat.  The LSTM's value lies in longer-horizon
-        regime forecasting and in informing the RL agent (Section~\ref{sec:integration}).
+        $[t-20, t]$ overlaps with 86\% of the forward target window $[t+1, t+21]$,
+        giving it an inherent informational advantage: under Nifty's strong
+        volatility clustering (Hurst exponent $\approx 0.65$), the past 21 days
+        of realised vol is already a near-optimal proxy for the next 21 days.
+        Any more complex model must improve on something that is already very
+        close to optimal, which is a fundamentally hard task.  The rv21 baseline
+        is included as a transparency control, not as a benchmark the LSTM must
+        beat; the LSTM's value lies in longer-horizon regime forecasting and
+        in informing the RL agent (Section~\ref{sec:integration}).
 
-  \item \textbf{India VIX worst} (MAE 0.0344).  Implied vol incorporates a
-        variance risk premium of $\approx 4$--$6\%$, causing systematic
-        over-forecasting of realised vol.
+  \item \textbf{India VIX worst} (MAE 0.0344).  Implied vol is computed under
+        the risk-neutral measure $\mathbb{Q}$, not the physical measure
+        $\mathbb{P}$.  By Girsanov's theorem, the market price of risk
+        $\theta = (\mu-r)/\sigma$ drives a wedge between the two measures:
+        investors pay a \emph{variance risk premium} to hedge volatility
+        exposure, causing implied vol to systematically exceed realised vol by
+        $\approx 4$--$6\%$.  India VIX is therefore a biased predictor of
+        future realised volatility, which explains its poor MAE relative to
+        physically-estimated models.
 
   \item \textbf{Directional accuracy near 50\%}.  All models are near
         coin-flip accuracy for predicting the sign of the next vol change.
-        This is expected: vol is mean-reverting, so direction is harder to
-        predict than level.
+        This is expected and reflects a fundamental property of vol dynamics:
+        \emph{volatility is predictable in level but not in direction.}
+        Persistence (volatility clustering) makes the level sticky ---
+        tomorrow's vol is likely close to today's --- but mean reversion
+        simultaneously pushes elevated vol downward and subdued vol upward.
+        These two forces roughly cancel, leaving
+        $\mathbb{P}(\sigma_{t+1}>\sigma_t)\approx 0.5$.  Directional accuracy
+        is therefore a poor metric for volatility models; what matters is
+        level accuracy (RMSE, MAE), where LSTM clearly beats GARCH.
 \end{itemize}
 
 \begin{figure}[H]
@@ -880,7 +1099,10 @@ option observations.
 
 \subsection{Design}
 
-The LSTM vol schedule $\{\hat\sigma_1,\ldots,\hat\sigma_{21}\}$ replaces the
+Part~III produced a per-day LSTM volatility forecast $\hat\sigma_t$ for each
+Nifty window.  Part~IV asks: can an RL agent exploit this richer vol signal in
+a way the analytic BSM formula cannot?  The LSTM vol schedule
+$\{\hat\sigma_1,\ldots,\hat\sigma_{21}\}$ replaces the
 fixed $\sigma$ in the hedging environment (\texttt{LSTMHedgingEnv}).  At each
 step $t$, the environment uses $\hat\sigma_t$ to simulate the GBM step,
 price the option $V_t$ for the reward, and supply $\sigma_t^{\mathrm{obs}} =
@@ -987,13 +1209,33 @@ stable across initialisations.
 
 \subsection{Methodology}
 
+Parts~I--IV evaluated strategies in simulation.  Part~V brings all
+components to real Nifty~50 data: does the advantage of the analytic hedge
+over RL survive on real price paths, and does the LSTM-guided execution
+rule improve further?
+
 We evaluate hedging strategies on real Nifty~50 price paths to test
 performance outside the GBM assumption.  Using the combined validation+test
 period (2020--2024), we extract 51 non-overlapping 21-day windows
-(stride $= n_{\mathrm{steps}} = 21$).  Each window $i$ uses the rv21 at its
-start as the hedge sigma $\hat\sigma_i$.  The starting price is aligned to
+(stride $= n_{\mathrm{steps}} = 21$).  The starting price is aligned to
 the nearest round Nifty-style strike.  Terminal P\&L is computed per
 equation~\eqref{eq:terminal_pnl} with $\kappa=0.001$.
+
+The original comparison uses the rolling 21-day realised volatility rv21 at
+window start as the hedge sigma.  We also evaluate two extensions using the
+same 51 windows: (i)~\textit{BSM-LSTM}, which replaces rv21 by the LSTM
+forecast at the start of the window, and (ii)~\textit{partial-BSM-LSTM}, a
+mixed execution rule around the BSM-LSTM target,
+\[
+  \Delta_{t+1} =
+  \begin{cases}
+    \Delta_t, & |\Delta_t^{\star}-\Delta_t| \le \theta, \\
+    \Delta_t + \alpha(\Delta_t^{\star}-\Delta_t), & \text{otherwise},
+  \end{cases}
+\]
+where $\Delta_t^{\star}$ is the BSM delta computed with the LSTM sigma.
+The hyperparameters $(\alpha,\theta)$ are selected on the validation windows
+only, then reported on the combined val+test sample.
 
 Statistical power: 51 non-overlapping windows covering five distinct volatility
 regimes (COVID recovery, 2021 rally, 2022 correction, 2023 recovery,
@@ -1010,10 +1252,12 @@ regimes (COVID recovery, 2021 rally, 2022 correction, 2023 recovery,
     \toprule
     Strategy & Mean P\&L & Std P\&L & MAE & MAE 95\% CI & Mean TC \\
     \midrule
-    BSM daily (real paths) & $+1.19$ & 162.2 & \textbf{105.1} & [74.7, 141.0] & 36.0 \\
-    RL PPO (real paths)    & $-13.4$ & 205.0 & 137.5 & [99.3, 181.1] & 39.4 \\
+    BSM daily (rv21)       & $+1.19$ & 162.2 & 105.1 & [74.7, 141.0] & 36.0 \\
+    RL PPO (rv21)          & $-13.4$ & 205.0 & 137.5 & [99.3, 181.1] & 39.4 \\
+    BSM-LSTM               & $+7.48$ & 144.0 & 96.1  & [69.6, 127.2] & 35.6 \\
+    Partial-BSM-LSTM       & $+1.02$ & 134.6 & \textbf{88.3} & [63.6, 118.4] & 27.4 \\
     \midrule
-    \multicolumn{6}{l}{Paired bootstrap: diff $= -32.4$,
+    \multicolumn{6}{l}{Primary paired bootstrap (BSM rv21 vs RL rv21): diff $= -32.4$,
       CI $= [-61.1, -6.6]$, $p = 0.013$} \\
     \bottomrule
   \end{tabular}
@@ -1023,23 +1267,27 @@ regimes (COVID recovery, 2021 rally, 2022 correction, 2023 recovery,
   \centering
   \begin{subfigure}[t]{0.48\textwidth}
     \includegraphics[width=\textwidth]{fig_bt_real_paths_pnl.png}
-    \caption{Terminal P\&L on 51 real Nifty windows.  BSM (blue) is tighter
-             and nearly unbiased; RL (orange) shows a left skew consistent
-             with systematic underhedging on trending paths.}
+    \caption{Legacy terminal P\&L comparison on 51 real Nifty windows.
+             Base BSM (rv21) is tighter and nearly unbiased; base PPO shows a
+             left skew consistent with systematic underhedging on trending paths.}
   \end{subfigure}
   \hfill
   \begin{subfigure}[t]{0.48\textwidth}
     \includegraphics[width=\textwidth]{fig_bt_real_paths_cumulative.png}
-    \caption{Cumulative absolute error over the 51 windows.  BSM diverges
-             from RL most sharply in the high-vol windows
-             (COVID recovery 2020--2021).}
+    \caption{Legacy cumulative absolute error over the 51 windows.  Base BSM
+             diverges from base PPO most sharply in the high-vol windows
+             (COVID recovery 2020--2021).  Table~\ref{tab:real_path} extends
+             this comparison to BSM-LSTM and Partial-BSM-LSTM.}
   \end{subfigure}
-  \caption{Real-path hedging results.}
+  \caption{Real-path hedging results.  The plotted panels show the original
+           rv21-BSM versus PPO comparison; the table above summarises the full
+           extended comparison including BSM-LSTM and Partial-BSM-LSTM.}
   \label{fig:real_paths}
 \end{figure}
 
-\textbf{Discussion.}  BSM daily outperforms RL on real paths (MAE 105.1
-vs.\ 137.5, $p=0.013$).  Three factors explain the gap:
+\textbf{Discussion.}  The original conclusion remains unchanged: base BSM with
+rv21 outperforms base PPO on real paths (MAE 105.1 vs.\ 137.5, $p=0.013$).
+Three factors explain the gap:
 (1)~\textit{Model misspecification alignment}: BSM's analytic formula was
 derived under assumptions closest to continuous risk-free pricing;
 (2)~\textit{Tail generalization}: real Nifty returns have excess kurtosis and
@@ -1047,6 +1295,19 @@ vol clustering that the GBM-trained RL agent has never encountered;
 (3)~\textit{Bias}: RL's negative mean P\&L ($-13.4$) indicates systematic
 underhedging on real paths, whereas BSM's near-zero mean ($+1.19$) shows
 minimal bias.
+
+The extensions sharpen the message.  Using the LSTM volatility forecast inside
+the analytic hedge improves MAE from 105.1 to 96.1, so volatility forecast
+quality does matter on real paths.  The best real-path result in the project is
+not a stand-alone RL policy but the mixed execution rule
+Partial-BSM-LSTM: with $(\alpha,\theta)=(0.9,0.1)$ it reaches MAE 88.3 while
+reducing mean transaction cost from 35.6 to 27.4.  This indicates that the
+useful learning-style ingredient is not replacing the BSM hedge target, but
+controlling \emph{how aggressively} to move toward that target under trading
+costs.  The exploratory paired bootstrap against BSM-LSTM gives diff
+$= +7.84$ (favouring Partial-BSM-LSTM), CI $=[-2.22, 18.56]$, $p=0.121$:
+economically meaningful, but not yet conventionally significant at this sample
+size.
 
 \textbf{Volatility regime slice:}
 \begin{center}
@@ -1174,6 +1435,11 @@ into a larger pricing error (see equation~\eqref{eq:vega} and Figure~\ref{fig:ve
 
 \subsection{Summary of Main Findings}
 
+Taken together, the five parts tell a coherent story: stochastic calculus
+provides the structure that makes machine learning useful.  RL in isolation
+fails to generalise; RL with analytic structure, learned vol, and distributional
+alignment succeeds.  The seven findings below trace this arc.
+
 \begin{enumerate}[leftmargin=*]
   \item \textbf{Under GBM, BSM delta is near-optimal; RL approximates but does
         not surpass it.}  The best RL variant (domain randomisation, MAE 0.723)
@@ -1199,10 +1465,12 @@ into a larger pricing error (see equation~\eqref{eq:vega} and Figure~\ref{fig:ve
         na\"{i}ve constant-$\sigma$ comparison the same agent appears marginally
         worse, illustrating how evaluation design can reverse apparent conclusions.
 
-  \item \textbf{On real Nifty paths, BSM outperforms RL.}  BSM daily
-        (MAE 105.1) beats RL PPO (137.5, $p=0.013$) on 51 real windows.
-        The model--reality gap (GBM training vs.\ fat-tailed reality) accounts
-        for the shortfall.
+  \item \textbf{On real Nifty paths, analytic structure beats stand-alone RL.}
+        Base BSM with rv21 (MAE 105.1) beats RL PPO (137.5, $p=0.013$), while
+        BSM-LSTM improves further to 96.1.  The best real-path result is a
+        mixed execution rule around the BSM-LSTM target (MAE 88.3), indicating
+        that adaptivity is most useful for \emph{how much} to rebalance, not
+        for replacing the analytic hedge outright.
 
   \item \textbf{Transaction costs are the binding constraint above
         $\kappa = 0.003$.}  Both methods degrade severely; at $\kappa=0.01$
@@ -1220,8 +1488,11 @@ into a larger pricing error (see equation~\eqref{eq:vega} and Figure~\ref{fig:ve
 
 \begin{enumerate}[leftmargin=*]
   \item \textbf{GBM-trained RL on real paths.}  The model--reality gap is
-        substantial; adding fat-tailed simulations (jump-diffusion, CGMY) or
-        real-returns training would improve real-path performance.
+        substantial; all stand-alone PPO and DQN variants underperform the
+        analytic real-path baselines.  Adding fat-tailed simulations
+        (jump-diffusion, CGMY), walk-forward real-returns training, or a
+        controller-style objective rather than direct delta prediction would
+        likely improve real-path performance.
 
   \item \textbf{BSM approximation in Heston environment.}  The environment
         prices options using BSM at $\sqrt{V_t}$ rather than the full Heston
@@ -1263,10 +1534,13 @@ into pricing errors.
 
 The strongest numerical results are:
 \begin{itemize}[leftmargin=*]
-  \item LSTM beats GARCH by 47\% on MAE --- a significant improvement on the
-        industry-standard benchmark.
+  \item LSTM beats GARCH by 41\% on MAE and 20\% on RMSE --- a significant
+        improvement over the industry-standard benchmark.
   \item LSTM-guided BSM delta achieves the lowest simulation hedging MAE
         (0.227), 20\% below BSM daily.
+  \item On real Nifty paths, BSM-LSTM improves over base BSM (MAE 96.1 vs.\
+        105.1), and the best overall real-path result is a mixed execution
+        rule around the BSM-LSTM target (MAE 88.3).
   \item LSTM-RL reduces MAE by 72\% in the natural habitat evaluation
         ($p<0.001$), demonstrating the value of vol information when
         distributional alignment is respected.

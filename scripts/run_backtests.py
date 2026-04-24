@@ -1,7 +1,8 @@
 """
 Extended backtests — run after run_p1.py and run_p3.py have completed.
 
-Backtest 1 — Real Nifty path: RL agent on actual price paths (not GBM)
+Backtest 1 — Real Nifty path: legacy RL PPO vs BSM(rv21) on actual price paths
+Backtest 1b — Fair real-path test: LSTM-RL vs BSM(LSTM sigma) on actual paths
 Backtest 2 — TC sensitivity:  MAE vs kappa for BSM daily and RL
 Backtest 3 — Moneyness:       pricing horse race at OTM / ATM / ITM
 Backtest 6 — Real path hedge: full terminal PnL comparison on real paths
@@ -48,6 +49,21 @@ splits   = split_data(X, y, dates)
 splits, scaler = normalize_splits(splits)
 
 rl_model = PPO.load(str(MODELS / "ppo_hedge_v1"))
+dr_model_path = MODELS / "ppo_domain_random"
+if not dr_model_path.with_suffix(".zip").exists():
+    raise FileNotFoundError(
+        "models/ppo_domain_random.zip not found. "
+        "Run scripts/run_p1.py first to generate the domain-randomized RL model."
+    )
+dr_model = PPO.load(str(dr_model_path))
+
+lstm_rl_path = MODELS / "ppo_lstm_hedge_v1"
+if not lstm_rl_path.with_suffix(".zip").exists():
+    raise FileNotFoundError(
+        "models/ppo_lstm_hedge_v1.zip not found. "
+        "Run scripts/run_integration.py first to generate the LSTM-RL model."
+    )
+lstm_rl_model = PPO.load(str(lstm_rl_path))
 
 lstm = VolLSTM(input_size=6, hidden1=64, hidden2=32)
 lstm.load_state_dict(torch.load(str(MODELS / "lstm_vol_best.pt"), map_location="cpu"))
@@ -127,10 +143,10 @@ def _run_bsm_on_path(price_path: np.ndarray, K: float, T: float,
 
 def _run_rl_on_path(price_path: np.ndarray, K: float, T: float,
                     r: float, sigma: float, kappa: float,
-                    model) -> tuple[float, float]:
+                    model, sigma_obs: bool = False) -> tuple[float, float]:
     """
     Run RL agent on a given price path using the pre-trained policy.
-    The agent observes (S/K, tau/T, delta_prev) at each step.
+    The agent observes (S/K, tau/T, delta_prev) and optionally sigma/0.20.
     Returns (terminal_pnl, total_tc).
     """
     n         = len(price_path) - 1
@@ -142,7 +158,10 @@ def _run_rl_on_path(price_path: np.ndarray, K: float, T: float,
 
     for t in range(n):
         tau   = max(T - t * dt, 1e-9)
-        obs   = np.array([S / K, tau / T, delta], dtype=np.float32)
+        obs_items = [S / K, tau / T, delta]
+        if sigma_obs:
+            obs_items.append(sigma / 0.20)
+        obs   = np.array(obs_items, dtype=np.float32)
         action, _ = model.predict(obs, deterministic=True)
         new_d = float(np.clip(action[0], 0.0, 1.0))
 
@@ -168,6 +187,42 @@ def _extract_real_paths(prices: np.ndarray, window: int = N_STEP,
     return paths
 
 
+def _extract_window_starts(values: np.ndarray, window: int = N_STEP,
+                           stride: int = N_STEP,
+                           min_value: float = 1e-6) -> list[float]:
+    """Pick the start-of-window scalar aligned with _extract_real_paths."""
+    starts = []
+    for i in range(0, len(values) - window, stride):
+        starts.append(float(max(values[i], min_value)))
+    return starts
+
+
+def _regime_switched_real_path_hedge(
+    price_path: np.ndarray,
+    K: float,
+    T: float,
+    r: float,
+    sigma_signal: float,
+    kappa: float,
+    sigma_high_cutoff: float,
+    bsm_sigma: float,
+    rl_model,
+) -> tuple[float, float, str]:
+    """
+    Conservative hybrid:
+      - low/mid vol: BSM daily with the supplied sigma signal
+      - high vol:    domain-randomized RL policy
+
+    The gate uses only start-of-window information, matching the real-path
+    setup used elsewhere in this script.
+    """
+    if sigma_signal >= sigma_high_cutoff:
+        pnl, tc = _run_rl_on_path(price_path, K, T, r, bsm_sigma, kappa, rl_model)
+        return pnl, tc, "rl_high_vol"
+    pnl, tc = _run_bsm_on_path(price_path, K, T, r, bsm_sigma, kappa)
+    return pnl, tc, "bsm_low_mid_vol"
+
+
 # =============================================================================
 # Backtests 1 & 6 — RL and BSM daily on real Nifty price paths
 # =============================================================================
@@ -181,57 +236,146 @@ print(f"Extracted {len(real_paths)} non-overlapping 21-day windows (val+test per
 
 bsm_pnl_real, bsm_tc_real = [], []
 rl_pnl_real,  rl_tc_real  = [], []
+bsm_pnl_real_lstm, bsm_tc_real_lstm = [], []
+rl_pnl_real_lstm,  rl_tc_real_lstm  = [], []
+hybrid_pnl_real, hybrid_tc_real = [], []
 real_start_moneyness = []
 real_sigma_levels = []
+real_lstm_sigma_levels = []
+hybrid_gate_labels = []
 
-# Use rv21 at the start of each window as hedge sigma
-hist_sigma_windows = []
-for i in range(0, len(combined_prices) - N_STEP, N_STEP):
-    hist_sigma_windows.append(float(combined_hist[i]))
+# Use the start-of-window vol estimate so all strategies only see information
+# available at hedge inception on that 21-day real-price window.
+hist_sigma_windows = _extract_window_starts(combined_hist, window=N_STEP, stride=N_STEP)
+lstm_sigma_windows = _extract_window_starts(combined_lstm, window=N_STEP, stride=N_STEP)
 
-for path, sigma in zip(real_paths, hist_sigma_windows):
+for path, sigma_hist, sigma_lstm in zip(real_paths, hist_sigma_windows, lstm_sigma_windows):
     S0 = path[0]
     K  = round(S0 / 50) * 50   # nearest 50-pt ATM strike (Nifty convention)
     real_start_moneyness.append(float(S0 / K))
-    real_sigma_levels.append(float(sigma))
+    real_sigma_levels.append(float(sigma_hist))
+    real_lstm_sigma_levels.append(float(sigma_lstm))
 
-    p_bsm, tc_bsm = _run_bsm_on_path(path, K, T_OPT, R, sigma, KAPPA)
-    p_rl,  tc_rl  = _run_rl_on_path( path, K, T_OPT, R, sigma, KAPPA, rl_model)
+    p_bsm, tc_bsm = _run_bsm_on_path(path, K, T_OPT, R, sigma_hist, KAPPA)
+    p_rl,  tc_rl  = _run_rl_on_path(path, K, T_OPT, R, sigma_hist, KAPPA, rl_model)
+    p_bsm_lstm, tc_bsm_lstm = _run_bsm_on_path(path, K, T_OPT, R, sigma_lstm, KAPPA)
+    p_rl_lstm,  tc_rl_lstm  = _run_rl_on_path(
+        path, K, T_OPT, R, sigma_lstm, KAPPA, lstm_rl_model, sigma_obs=True
+    )
+    p_hybrid, tc_hybrid, hybrid_label = _regime_switched_real_path_hedge(
+        path,
+        K,
+        T_OPT,
+        R,
+        sigma_lstm,
+        KAPPA,
+        sigma_high_cutoff=0.25,
+        bsm_sigma=sigma_lstm,
+        rl_model=dr_model,
+    )
 
     bsm_pnl_real.append(p_bsm)
     bsm_tc_real.append(tc_bsm)
     rl_pnl_real.append(p_rl)
     rl_tc_real.append(tc_rl)
+    bsm_pnl_real_lstm.append(p_bsm_lstm)
+    bsm_tc_real_lstm.append(tc_bsm_lstm)
+    rl_pnl_real_lstm.append(p_rl_lstm)
+    rl_tc_real_lstm.append(tc_rl_lstm)
+    hybrid_pnl_real.append(p_hybrid)
+    hybrid_tc_real.append(tc_hybrid)
+    hybrid_gate_labels.append(hybrid_label)
 
 bsm_pnl_real = np.array(bsm_pnl_real)
 rl_pnl_real  = np.array(rl_pnl_real)
+bsm_pnl_real_lstm = np.array(bsm_pnl_real_lstm)
+rl_pnl_real_lstm  = np.array(rl_pnl_real_lstm)
+hybrid_pnl_real   = np.array(hybrid_pnl_real)
 
 summary_real = pd.DataFrame({
-    "Strategy":  ["BSM daily (real paths)", "RL PPO (real paths)"],
-    "Mean PnL":  [np.mean(bsm_pnl_real), np.mean(rl_pnl_real)],
-    "Std PnL":   [np.std(bsm_pnl_real),  np.std(rl_pnl_real)],
-    "MAE":       [np.mean(np.abs(bsm_pnl_real)), np.mean(np.abs(rl_pnl_real))],
-    "Mean TC":   [np.mean(bsm_tc_real),   np.mean(rl_tc_real)],
+    "Strategy":  [
+        "BSM daily (rv21 sigma, real paths)",
+        "RL PPO baseline (rv21 sigma, real paths)",
+        "BSM daily (LSTM sigma, real paths)",
+        "RL PPO (LSTM sigma, real paths)",
+        "Hybrid (BSM-LSTM low/mid, DR-RL high)",
+    ],
+    "Mean PnL":  [
+        np.mean(bsm_pnl_real),
+        np.mean(rl_pnl_real),
+        np.mean(bsm_pnl_real_lstm),
+        np.mean(rl_pnl_real_lstm),
+        np.mean(hybrid_pnl_real),
+    ],
+    "Std PnL":   [
+        np.std(bsm_pnl_real),
+        np.std(rl_pnl_real),
+        np.std(bsm_pnl_real_lstm),
+        np.std(rl_pnl_real_lstm),
+        np.std(hybrid_pnl_real),
+    ],
+    "MAE":       [
+        np.mean(np.abs(bsm_pnl_real)),
+        np.mean(np.abs(rl_pnl_real)),
+        np.mean(np.abs(bsm_pnl_real_lstm)),
+        np.mean(np.abs(rl_pnl_real_lstm)),
+        np.mean(np.abs(hybrid_pnl_real)),
+    ],
+    "Mean TC":   [
+        np.mean(bsm_tc_real),
+        np.mean(rl_tc_real),
+        np.mean(bsm_tc_real_lstm),
+        np.mean(rl_tc_real_lstm),
+        np.mean(hybrid_tc_real),
+    ],
 }).set_index("Strategy").round(4)
 
 print(summary_real.to_string())
 summary_real.to_csv(RESULTS / "bt_real_paths_summary.csv")
 
 real_analysis = {
-    "bsm_daily": analyse_hedging_results(
+    "legacy_bsm_rv21": analyse_hedging_results(
         bsm_pnl_real,
         np.asarray(bsm_tc_real),
         moneyness=np.asarray(real_start_moneyness),
         sigma_proxy=np.asarray(real_sigma_levels),
     ),
-    "rl_ppo": analyse_hedging_results(
+    "legacy_rl_ppo": analyse_hedging_results(
         rl_pnl_real,
         np.asarray(rl_tc_real),
         moneyness=np.asarray(real_start_moneyness),
         sigma_proxy=np.asarray(real_sigma_levels),
     ),
+    "fair_bsm_lstm_sigma": analyse_hedging_results(
+        bsm_pnl_real_lstm,
+        np.asarray(bsm_tc_real_lstm),
+        moneyness=np.asarray(real_start_moneyness),
+        sigma_proxy=np.asarray(real_lstm_sigma_levels),
+    ),
+    "fair_rl_lstm_sigma": analyse_hedging_results(
+        rl_pnl_real_lstm,
+        np.asarray(rl_tc_real_lstm),
+        moneyness=np.asarray(real_start_moneyness),
+        sigma_proxy=np.asarray(real_lstm_sigma_levels),
+    ),
+    "hybrid_bsm_lstm_dr_highvol": analyse_hedging_results(
+        hybrid_pnl_real,
+        np.asarray(hybrid_tc_real),
+        moneyness=np.asarray(real_start_moneyness),
+        sigma_proxy=np.asarray(real_lstm_sigma_levels),
+    ),
     "paired_bootstrap": {
-        "bsm_vs_rl": paired_bootstrap_mae_diff(bsm_pnl_real, rl_pnl_real),
+        "legacy_bsm_rv21_vs_rl_ppo": paired_bootstrap_mae_diff(bsm_pnl_real, rl_pnl_real),
+        "fair_bsm_lstm_vs_rl_lstm": paired_bootstrap_mae_diff(
+            bsm_pnl_real_lstm, rl_pnl_real_lstm
+        ),
+        "fair_bsm_lstm_vs_hybrid": paired_bootstrap_mae_diff(
+            bsm_pnl_real_lstm, hybrid_pnl_real
+        ),
+    },
+    "hybrid_gate_counts": {
+        "bsm_low_mid_vol": int(sum(label == "bsm_low_mid_vol" for label in hybrid_gate_labels)),
+        "rl_high_vol": int(sum(label == "rl_high_vol" for label in hybrid_gate_labels)),
     },
 }
 with open(RESULTS / "bt_real_paths_analysis.json", "w") as f:
@@ -252,6 +396,20 @@ fig.savefig(RESULTS / "bt_real_paths_pnl.png", dpi=150)
 plt.close(fig)
 print("Saved bt_real_paths_pnl.png")
 
+# Plot — fair LSTM-sigma real-path comparison
+fig, ax = plt.subplots(figsize=(9, 5))
+ax.hist(bsm_pnl_real_lstm, bins=30, alpha=0.6, label="BSM daily (LSTM sigma)", density=True)
+ax.hist(rl_pnl_real_lstm,  bins=30, alpha=0.6, label="RL PPO (LSTM sigma)", density=True)
+ax.axvline(0, color="black", lw=1, ls="--")
+ax.set_xlabel("Terminal hedging PnL (₹)")
+ax.set_ylabel("Density")
+ax.set_title("Fair real-path hedge — BSM vs LSTM-RL with matched sigma signal")
+ax.legend()
+plt.tight_layout()
+fig.savefig(RESULTS / "bt_real_paths_lstm_fair_pnl.png", dpi=150)
+plt.close(fig)
+print("Saved bt_real_paths_lstm_fair_pnl.png")
+
 # Plot — cumulative MAE over time
 fig, ax = plt.subplots(figsize=(11, 4))
 ax.plot(np.cumsum(np.abs(bsm_pnl_real)), label="BSM daily", lw=2)
@@ -264,6 +422,31 @@ plt.tight_layout()
 fig.savefig(RESULTS / "bt_real_paths_cumulative.png", dpi=150)
 plt.close(fig)
 print("Saved bt_real_paths_cumulative.png")
+
+fig, ax = plt.subplots(figsize=(11, 4))
+ax.plot(np.cumsum(np.abs(bsm_pnl_real_lstm)), label="BSM daily (LSTM sigma)", lw=2)
+ax.plot(np.cumsum(np.abs(rl_pnl_real_lstm)),  label="RL PPO (LSTM sigma)", lw=2, ls="--")
+ax.set_xlabel("Episode (21-day window)")
+ax.set_ylabel("Cumulative absolute PnL error")
+ax.set_title("Cumulative hedging error — fair LSTM-sigma real-path test")
+ax.legend()
+plt.tight_layout()
+fig.savefig(RESULTS / "bt_real_paths_lstm_fair_cumulative.png", dpi=150)
+plt.close(fig)
+print("Saved bt_real_paths_lstm_fair_cumulative.png")
+
+fig, ax = plt.subplots(figsize=(9, 5))
+ax.hist(bsm_pnl_real_lstm, bins=30, alpha=0.5, label="BSM daily (LSTM sigma)", density=True)
+ax.hist(hybrid_pnl_real, bins=30, alpha=0.5, label="Hybrid regime switch", density=True)
+ax.axvline(0, color="black", lw=1, ls="--")
+ax.set_xlabel("Terminal hedging PnL (₹)")
+ax.set_ylabel("Density")
+ax.set_title("Hybrid real-path hedge vs BSM-LSTM")
+ax.legend()
+plt.tight_layout()
+fig.savefig(RESULTS / "bt_real_paths_hybrid_pnl.png", dpi=150)
+plt.close(fig)
+print("Saved bt_real_paths_hybrid_pnl.png")
 
 
 # =============================================================================
@@ -431,10 +614,16 @@ print("=" * 60)
 
 consolidated = {
     "real_path_hedging": {
-        "bsm_daily": {"mae": float(np.mean(np.abs(bsm_pnl_real))),
-                      "std": float(np.std(bsm_pnl_real))},
-        "rl_ppo":    {"mae": float(np.mean(np.abs(rl_pnl_real))),
-                      "std": float(np.std(rl_pnl_real))},
+        "legacy_bsm_rv21": {"mae": float(np.mean(np.abs(bsm_pnl_real))),
+                            "std": float(np.std(bsm_pnl_real))},
+        "legacy_rl_ppo":   {"mae": float(np.mean(np.abs(rl_pnl_real))),
+                            "std": float(np.std(rl_pnl_real))},
+        "fair_bsm_lstm_sigma": {"mae": float(np.mean(np.abs(bsm_pnl_real_lstm))),
+                                "std": float(np.std(bsm_pnl_real_lstm))},
+        "fair_rl_lstm_sigma":  {"mae": float(np.mean(np.abs(rl_pnl_real_lstm))),
+                                "std": float(np.std(rl_pnl_real_lstm))},
+        "hybrid_bsm_lstm_dr_highvol": {"mae": float(np.mean(np.abs(hybrid_pnl_real))),
+                                       "std": float(np.std(hybrid_pnl_real))},
     },
     "tc_sensitivity": df_tc.to_dict(orient="list"),
     "moneyness":      {k: v.to_dict() for k, v in all_summaries.items()},
@@ -447,5 +636,8 @@ print("Saved bt_consolidated.json")
 print("\nAll backtest outputs in results/")
 print("  bt_real_paths_pnl.png       — PnL distributions on real paths")
 print("  bt_real_paths_cumulative.png — cumulative MAE over time")
+print("  bt_real_paths_lstm_fair_pnl.png — fair LSTM-sigma PnL distributions")
+print("  bt_real_paths_lstm_fair_cumulative.png — fair LSTM-sigma cumulative MAE")
+print("  bt_real_paths_hybrid_pnl.png — hybrid regime-switch PnL distributions")
 print("  bt_tc_sensitivity.png       — MAE and cost vs kappa")
 print("  bt_moneyness.png            — pricing MAE by OTM/ATM/ITM")
