@@ -209,8 +209,6 @@ This is where the best model in the repository, `Partial-BSM-LSTM(alpha=0.90, th
 ├── README.md
 ├── requirements.txt
 ├── setup.sh
-├── report.tex
-├── report_short.tex
 ├── report/
 │   ├── Report.pdf
 │   └── short_report.pdf
@@ -260,7 +258,6 @@ The current [requirements.txt](requirements.txt) is aligned with the scripts and
 
 - some scripts may refresh market data using `yfinance`
 - running the full pipeline will create local `data/`, `models/`, and `results/` directories if they are absent
-- LaTeX compilation requires a separate TeX installation
 
 ## Reproducibility
 
@@ -298,7 +295,7 @@ python scripts/run_backtests.py
 python scripts/run_anchor_models.py
 ```
 
-Then inspect the regenerated files under `results/` locally, and compare them with the tracked summaries in [report_short.tex](report_short.tex) and [report/short_report.pdf](report/short_report.pdf).
+Then inspect the regenerated files under `results/` locally, and compare them with the tracked summaries in [report/short_report.pdf](report/short_report.pdf).
 
 ## Generated Outputs
 
@@ -316,15 +313,8 @@ If you want the generated artifacts without rerunning the pipeline, use:
 
 ## Reports And Figures
 
-- Full report source: [report.tex](report.tex)
-- Short report source: [report_short.tex](report_short.tex)
-
-To compile locally:
-
-```bash
-pdflatex report.tex
-pdflatex report_short.tex
-```
+- Full report: [report/Report.pdf](report/Report.pdf)
+- Short report: [report/short_report.pdf](report/short_report.pdf)
 
 ## Caveats
 
