@@ -58,7 +58,6 @@ Interpretation:
 - giving PPO the LSTM sigma setup does not close the gap
 - the best improvement comes from controlling execution around the analytic target
 
-![Real-path comparison](report_figures/fig_bt_real_paths_pnl.png)
 
 ### Forecasting takeaway
 
