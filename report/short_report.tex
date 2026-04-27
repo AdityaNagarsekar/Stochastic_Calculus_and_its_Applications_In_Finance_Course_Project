@@ -75,7 +75,7 @@
    Heston simulation};
 
 \node[rbox] (fail) at ( 2.0,-3.6)
-  {\textbf{All 7 RL variants}\\[1pt]
+  {\textbf{RL variants}\\[1pt]
    fail on real paths\\
    MAE 168--281\\
    (low-turnover\\
@@ -271,24 +271,25 @@ India VIX   & 0.0453 & 0.0344 & 0.523 \\
 error. LSTM reduces MAE by \textbf{41\%} over GARCH(1,1) (0.0114 vs 0.0194),
 a clear win for the learned model. However, the naive realized-volatility
 persistence baseline (rv21) remains strongest at the 21-day horizon: the
-trailing 21-day window $[t\!-\!20,\,t]$ overlaps \textbf{86\%} with the
-forward target $[t\!+\!1,\,t\!+\!21]$ under volatility clustering
+trailing 21-day window $[t\!-\!20,\,t]$ is adjacent to the forward target
+$[t\!+\!1,\,t\!+\!21]$ and highly informative under volatility clustering
 (Nifty Hurst exponent $H\approx0.65$), making persistence a near-optimal
-predictor at this horizon.  This structural overlap limits the room available
-to any model, including LSTM, to outperform simple persistence.
+predictor at this horizon.  This strong short-horizon persistence limits
+the room available to any model, including LSTM, to outperform simple
+lagged realized volatility.
 
 \subsection*{Option Pricing Horse-Race}
 To isolate the effect of the volatility estimate on option prices, we
-computed model prices for 51 held-out Nifty options and measured RMSE
+computed model prices for 51 held-out Nifty options and measured MAE
 against market prices (Table~\ref{tab:pricing}).
 
 \begin{table}[H]
 \centering
-\caption{Option pricing RMSE on Nifty~50 (lower is better).}
+\caption{Option pricing MAE on Nifty~50 (lower is better).}
 \label{tab:pricing}
 \begin{tabular}{lc}
 \toprule
-Volatility input & Pricing RMSE \\
+Volatility input & Pricing MAE \\
 \midrule
 GARCH(1,1)             & 43.6 \\
 \textbf{LSTM forecast} & \textbf{30.3} \\
@@ -299,13 +300,13 @@ India VIX (implied)    & 18.7 \\
 \end{table}
 
 \textbf{Takeaway.} LSTM substantially outperforms GARCH in pricing
-($-31\%$ RMSE: $30.3$ vs $43.6$), a \textbf{positive} result for the
+($-31\%$ MAE: $30.3$ vs $43.6$), a \textbf{positive} result for the
 learned model.  rv21 and implied volatility are nearly tied at the top;
-the gap between rv21 and LSTM at the 21-day horizon again reflects the
-86\% window overlap, not a limitation of the neural architecture.  India
-VIX's near-parity with rv21 confirms that the variance risk premium (the
-gap between $\mathbb{Q}$ and $\mathbb{P}$ measures) is small relative to
-the persistence effect at this horizon.
+the gap between rv21 and LSTM at the 21-day horizon again reflects strong
+short-horizon volatility persistence, not a limitation of the neural
+architecture.  India VIX's near-parity with rv21 confirms that the
+variance risk premium (the gap between $\mathbb{Q}$ and $\mathbb{P}$
+measures) is small relative to the persistence effect at this horizon.
 
 \subsection*{Real-Path Backtesting}
 The main evaluation uses 51 non-overlapping 21-day windows from real
@@ -393,7 +394,7 @@ allowed large residual hedge error.
 
 \textbf{Domain randomization (variant~F).}  Training over a wide range of
 GBM parameters (spanning low to extreme volatility) produced the most
-BSM-consistent policy in simulation: MAE~0.723, BSM-correlation~\textbf{0.964}.
+BSM-consistent policy in simulation: MAE~0.723, BSM-correlation~\textbf{0.963}.
 This is a \textbf{positive} RL result in-distribution, confirming that
 the failure on real paths is primarily a distributional-shift problem, not
 a capacity problem.
@@ -402,8 +403,9 @@ a capacity problem.
 RL policy in a regime-switch ensemble yielded a real-path MAE of
 \textbf{100.0}, narrowing the gap to BSM (105.1) and outperforming any
 stand-alone RL variant.  This is the only RL-augmented method that
-approaches competitive real-path performance, and the only one that
-beats BSM-LSTM (96.1) is further left as a target for future work.
+approaches competitive real-path performance, although it still does not
+beat BSM-LSTM (96.1) or Partial-BSM-LSTM (88.3).
+Closing this remaining gap is left for future work.
 
 This suggests that the challenge is not expressivity but robustness: RL
 policies can fit simulated dynamics but fail under the distributional
@@ -423,26 +425,26 @@ but structure plus good inputs remains the dominant strategy.
 To isolate whether LSTM-conditioned RL is intrinsically limited or simply
 harmed by out-of-distribution shift, we evaluated it in its
 \emph{natural habitat}: the same GBM-with-LSTM-volatility environment used
-for training.  The constant-$\sigma$ BSM baseline in this environment
+for training.  The constant-$\sigma$ RL baseline in this environment
 achieves MAE~$1.435$; the LSTM-RL agent achieves MAE~$\mathbf{0.407}$.
 
 \begin{table}[H]
 \centering
-\caption{LSTM-RL in its training environment (natural habitat), $n=500$ paths.}
+\caption{LSTM-RL in its training environment (natural habitat), $n=1000$ paths.}
 \label{tab:habitat}
 \begin{tabular}{lcc}
 \toprule
 Strategy & MAE & CVaR$_{95}$ \\
 \midrule
-Constant-$\sigma$ BSM & 1.435 & $-2.14$ \\
-\textbf{LSTM-RL (PPO)} & \textbf{0.407} & $\mathbf{-0.77}$ \\
+Constant-$\sigma$ RL & 1.435 & $-5.08$ \\
+\textbf{LSTM-RL (PPO)} & \textbf{0.407} & $\mathbf{-1.85}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
 \textbf{Takeaway.}  LSTM-RL achieves a \textbf{72\% reduction in MAE} and a
-\textbf{64\% reduction in CVaR$_{95}$} versus the constant-vol baseline in its
-training environment ($p<0.001$, paired bootstrap).  This is the
+\textbf{64\% reduction in CVaR$_{95}$} versus the constant-$\sigma$ RL
+baseline in its training environment ($p<0.001$, paired bootstrap).  This is the
 \textbf{strongest positive RL result in the study}: the agent genuinely
 learns a better policy when the evaluation distribution matches training.
 The failure on real Nifty paths is therefore a distributional-shift problem,

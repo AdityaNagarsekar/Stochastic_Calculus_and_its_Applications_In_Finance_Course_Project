@@ -267,12 +267,12 @@ Conservative updates prevent destructive policy changes in noisy financial rewar
 Agent (variant) & MAE & BSM-$\Delta$ Corr. \\
 \midrule
 BSM (analytic) & \best{0.284} & --- \\
-A: GBM + MSE (base) & 0.830 & 0.946 \\
+A: GBM + MSE (base) & 0.830 & 0.947 \\
 B: GBM + It\^{o} reward & 0.926 & 0.935 \\
 C: Heston + MSE & 0.790 & 0.963 \\
 D: Heston + It\^{o} & 0.790 & 0.958 \\
 E: GBM + It\^{o} + $\Gamma$ obs & 0.764 & 0.957 \\
-F: GBM + domain rand.\ $\sigma$ & \best{0.723} & \textbf{0.964} \\
+F: GBM + domain rand.\ $\sigma$ & \best{0.723} & \textbf{0.963} \\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -308,7 +308,8 @@ $J_5$: \textbf{0.786} vs BSM 1.015 vs RL 1.424
 \[
   \text{price error} \approx \text{Vega} \times 0.01 = S\sqrt{\tau}\,\phi(d_1) \times 0.01
 \]
-For ATM Nifty options ($S\!\approx\!22{,}000$, $\tau=21/252$): $\approx$ \textbf{25 points per 1 percentage-point vol error} (typical 13--18 pp forecasting error $\Rightarrow$ 330--450 points total pricing impact).
+For ATM Nifty options ($S\!\approx\!22{,}000$, $\tau=21/252$): $\approx$ \textbf{25 points per 1 pp vol error}.\\[0.3em]
+{\small GARCH error $\approx1.9$ pp $\Rightarrow$ \textbf{49 pts};\quad LSTM $\approx1.1$ pp $\Rightarrow$ \textbf{29 pts};\quad rv21 $\approx0.4$ pp $\Rightarrow$ \textbf{11 pts}. GARCH$\to$LSTM saves $\approx$\textbf{20 pts/option}.}
 
 \medskip
 \begin{columns}[T]
@@ -317,7 +318,7 @@ For ATM Nifty options ($S\!\approx\!22{,}000$, $\tau=21/252$): $\approx$ \textbf
 \begin{itemize}\itemsep2pt
   \item 2-layer stacked LSTM, hidden dims \textbf{64 + 32}
   \item Sequence length: \textbf{60 trading days}
-  \item 5 features: rv5, rv21, log-return, momentum, rv\_ratio
+  \item 6 features: rv5, rv21, rv\_ratio, log-return, |return|, mom5
   \item Target: $\sigma_{\text{realized}}$ over next 21 days
   \item Train 70\% / Val 15\% / Test 15\% (chronological)
 \end{itemize}
@@ -555,11 +556,11 @@ GBM training lacks real Nifty's volatility clustering, heavy tails, and regime c
 \[
   r_t^B = -\!\left(\varepsilon_t - \tfrac{1}{2}\Gamma\bigl[(\Delta S_t)^2 - \sigma^2 S_t^2\Delta t\bigr]\right)^{\!2} - \kappa|\delta_t - \delta_{t-1}|S_t
 \]
-In theory, removes irreducible noise to sharpen the signal.\\[0.3em]
+Intended to isolate the controllable error $\varepsilon_t+G_t = (\delta-\Delta^\star)\Delta S$; subtraction doubles the noise instead.\\[0.3em]
 \textbf{In practice, B is \emph{worse} than A} (MAE $0.926$ vs $0.830$).
 
 \medskip
-\textbf{Problem:} Near convergence ($\delta_t\to\Delta^\star_t$) the gamma term vanishes — so does the gradient, removing the reinforcement signal.
+\textbf{Problem:} Near convergence, gradient $\propto (\varepsilon_t - G_t)\!\approx\!-2G_t$ — \emph{pure noise}, destabilising training rather than converging.
 
 \medskip
 \textbf{Variant E:} adds $\Gamma$ as a \emph{state observation} instead. Gradient preserved; achieves MAE $0.764$ — best among all variants without domain randomisation.

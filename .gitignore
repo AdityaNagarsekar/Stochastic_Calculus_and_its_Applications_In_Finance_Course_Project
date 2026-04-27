@@ -4,3 +4,5 @@ results/
 output.log
 report_figures/
 notebooks/
+report/speaker_notes.pdf
+report/speaker_notes.tex
